@@ -9,12 +9,11 @@ extern crate quote;
 
 use std::str::FromStr;
 
-use proc_macro2::{Group, Ident, Span, TokenTree, TokenStream};
-use syn::{parse_quote, Attribute, Field, Variant, Meta};
+use proc_macro2::{Group, Ident, Span, TokenStream, TokenTree};
+use syn::{parse_quote, Attribute, Field, Meta, Variant};
 
 /// Enum variant extracted from the original enum.
 /// id == None means the default case
-#[derive(Debug)]
 struct EnumVariant {
     id: Option<TokenTree>,
     name: Ident,
@@ -30,16 +29,19 @@ impl TryFrom<Variant> for EnumVariant {
         let fields = variant.fields.into_iter().collect();
 
         // Parse variant's attributes
-        let internal_attrs_idx = attrs.iter().position(|a| match &a.meta {
-            Meta::List(list) => {
-                if let Some(ident) = list.path.get_ident() {
-                    ident.to_string() == "attr"
-                } else {
-                    false
+        let internal_attrs_idx = attrs
+            .iter()
+            .position(|a| match &a.meta {
+                Meta::List(list) => {
+                    if let Some(ident) = list.path.get_ident() {
+                        ident.to_string() == "attr"
+                    } else {
+                        false
+                    }
                 }
-            },
-            _ => false
-        }).expect("Each enum variant needs to be have an attr attribute. #[attr(ID = 0x42)]");
+                _ => false,
+            })
+            .expect("Each enum variant needs to be have an attr attribute. #[attr(ID = 0x42)]");
         let internal_attrs = attrs.remove(internal_attrs_idx);
         let Meta::List(internal_attrs) = internal_attrs.meta else {
             panic!("`attr` attribute needs to describe a list. E.g: #[attr(ID = 0x42)]");
@@ -60,7 +62,9 @@ impl TryFrom<Variant> for EnumVariant {
             match ident.to_string().as_str() {
                 "ID" => {
                     expect_punct_token(tokens_iter.next());
-                    let value = tokens_iter.next().expect("Unknown attr syntax. Expected `#[attr(ID = 0x42)]`");
+                    let value = tokens_iter
+                        .next()
+                        .expect("Unknown attr syntax. Expected `#[attr(ID = 0x42)]`");
 
                     id = Some(match &value {
                         TokenTree::Ident(ident) => {
@@ -71,7 +75,7 @@ impl TryFrom<Variant> for EnumVariant {
                                 Some(value)
                             }
                         }
-                        _ => Some(value)
+                        _ => Some(value),
                     });
                 }
                 name => {
@@ -85,26 +89,19 @@ impl TryFrom<Variant> for EnumVariant {
         }
 
         let id = id.expect("Missing ID identifier.Each enum variant needs to be assigned an ID. #[attr(ID = 0x42)]");
-        Ok(EnumVariant {
-            id,
-            name,
-            fields,
-        })
+        Ok(EnumVariant { id, name, fields })
     }
 }
-
 
 /// Argument to #[enum_parse(...)] macro that will be passed 1:1
 /// to generated structs. Can be derive(Debug) or just e.g. no_mangle,
 /// so the group is optional.
-#[derive(Debug)]
 struct EnumAttribute {
     ident: Ident,
     group: Option<Group>,
 }
 
 /// Parsed attr(...) argument from #[enum_parse(..., attr(...)] macro
-#[derive(Debug)]
 struct EnumInternalAttributes {
     parse_input: TokenStream,
     parse_fn: String,
@@ -144,10 +141,10 @@ fn consume_tokens_until_comma<I: Iterator<Item = TokenTree>>(tokens_iter: &mut I
             match punct.as_char() {
                 '<' => {
                     depth = depth.checked_add(1).unwrap();
-                },
+                }
                 '>' => {
                     depth = depth.checked_sub(1).unwrap();
-                },
+                }
                 ',' => {
                     if depth == 0 {
                         break;
@@ -206,7 +203,6 @@ impl TryFrom<TokenStream> for EnumInternalAttributes {
 }
 
 /// All arguments passed to #[enum_parse(...)] macro
-#[derive(Debug)]
 struct EnumParseArgs {
     struct_attrs: Vec<EnumAttribute>,
     internal_attrs: EnumInternalAttributes,
@@ -230,10 +226,12 @@ impl TryFrom<TokenStream> for EnumParseArgs {
                 break;
             };
             let TokenTree::Ident(ident) = ident else {
-                panic!("Malformed #[enum_parse(...)] syntax. Expected Ident. Example: \n\
+                panic!(
+                    "Malformed #[enum_parse(...)] syntax. Expected Ident. Example: \n\
                         \t#[enum_parse(derive(Debug, Default), \n\
                         \t\trepr(C, packed), \n\
-                        \t\tattr(parse_fn = my_fn))]");
+                        \t\tattr(parse_fn = my_fn))]"
+                );
             };
 
             let group = match tokens_iter.next() {
@@ -271,8 +269,139 @@ impl TryFrom<TokenStream> for EnumParseArgs {
     }
 }
 
+/// Procedural macro used on enums to provide a parse() method that deserializes
+/// given input data into one of the enum variants:
+/// ```
+/// Self::parse(input: T, id: usize) -> Option<Self>;
+/// ```
+/// The specific variant is chosen by numeric index (usize), which needs to be
+/// assigned to every variant with a custom attribute: `#[attr(ID = 0xABCD)]`.
+///
+/// This macro doesn't define the means of deserialization. It has to be provided
+/// by the user, most likely from another crate.
+///
+/// # Examples
+///
+/// (SomehowParsable is an imaginary derive that implements a trait)
+/// ```
+/// use enum_parse::enum_parse;
+///
+/// #[enum_parse(derive(SomehowParsable, Debug, Default),
+///              repr(C, packed),
+///              attr(parse_input = &[u8], parse_fn = somehow_parse))]
+/// pub enum Payload {
+///     #[attr(ID = 0x2b)]
+///     Hello { a: u8, b: u64, c: u64, d: u8 },
+///     #[attr(ID = 0x42)]
+///     Goodbye { a: u8, e: u8 },
+///     #[attr(ID = _)]
+///     Unknown,
+/// }
+///
+/// pub fn parse_packet(data: &[u8]) -> Option<Payload> {
+///     let id: usize = data[0] as usize;
+///     // parse method is generated by the macro
+///     Payload::parse(&data[1..], id)
+/// }
+/// ```
+/// (This example expects SomehowParsable to provide a somehow_parse function that
+/// accepts a single `&[u8]` parameter)
+///
+/// To achieve this goal, this macro generates a structure for each enum variant,
+/// then modifies the enum variants to contain those structure instead. All
+/// attributes provided to `#[enum_parse]` are passed to those generated structures
+/// with the exception of attr(...) attribute, which is parsed internally by
+/// `#[enum_parse]`.
+///
+/// The `enum_parse(..., attr(...))` attribute can define the following properties:
+///   * `parse_fn` = name_of_function_implemented_by_derive_traits
+///   * `parse_input` = data_type_accepted_by_the above_function
+///
+/// The per-veriant `#[attr(...)]` attribute can currently define only the ID of
+/// the variant. Additional attributes to enum variants are currently not supported.
+///
+/// The `#[attr(ID = ...)]` attribute can define a numerical index, or any other
+/// const-evaluated expression, e.g:
+/// ```
+/// #[attr(ID = HELLO_PACKET_ID)]
+/// ```
+/// where HELLO_PACKET_ID is defined as:
+/// ```
+/// const HELLO_PACKET_ID: usize = 0xAA;
+/// ```
+///
+/// The `#[attr(ID = ...)]` attribute can be also a special `_` character that is
+/// used to match-all in the parse method:
+///
+/// ```
+/// #[attr(ID = _)]
+/// Unknown,
+/// ```
+/// or
+/// ```
+/// #[attr(ID = _)]
+/// Unknown { some_always_present_byte: u8 },
+/// ```
+///
+/// If the match-all variant contains no fields, the parse() function will always
+/// return it upon matching unknown id. If the variant contains some fields, the
+/// parse() function will attempt to call parse_fn on it.
+///
+/// For the original example code, the expanded version would be:
+///
+/// ```
+/// pub enum Payload {
+///     Hello(Hello),
+///     Goodbye(Goodbye),
+///     Unknown,
+/// }
+///
+/// impl Payload {
+///     pub fn parse(data: &[u8], id: usize) -> Option<Self> {
+///         match id {
+///             Hello::ID => Hello::read_from(data).map(|s| Self::Hello(s)),
+///             Goodbye::ID => Goodbye::read_from(data).map(|s| Self::Goodbye(s)),
+///             _ => Some(Self::Unknown),
+///         }
+///     }
+/// }
+///
+/// #[derive(SomehowParsable, Debug, Default)]
+/// #[repr(C, packed)]
+/// pub struct Hello {
+///     pub a: u8,
+///     pub b: u64,
+///     pub c: u64,
+///     pub d: u8,
+/// }
+/// impl Hello {
+///     pub const ID: usize = 0x2b;
+/// }
+///
+/// #[derive(SomehowParsable, Debug, Default)]
+/// #[repr(C, packed)]
+/// pub struct Goodbye {
+///     pub a: u8,
+///     pub e: u8,
+/// }
+/// impl Goodbye {
+///     pub const ID: usize = 0x42;
+/// }
+///
+/// #[derive(SomehowParsable, Debug, Default)]
+/// #[repr(C, packed)]
+/// pub struct Unknown {}
+///
+/// pub fn parse_packet(data: &[u8]) -> Option<Payload> {
+///     ...
+/// }
+/// ```
+
 #[proc_macro_attribute]
-pub fn enum_parse(attr: proc_macro::TokenStream, input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn enum_parse(
+    attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
     let attr: TokenStream = attr.into();
     let args: EnumParseArgs = attr.try_into().unwrap();
 
@@ -297,18 +426,20 @@ pub fn enum_parse(attr: proc_macro::TokenStream, input: proc_macro::TokenStream)
             }
             EnumVariant::try_from(variant)
         })
-        .collect::<Result<Vec<EnumVariant>, _>>().unwrap();
+        .collect::<Result<Vec<EnumVariant>, _>>()
+        .unwrap();
 
     // Re-create the original enum, now referencing soon-to-be-created structs
     // Also define the parsing method
     let parse_fn = Ident::new(args.internal_attrs.parse_fn.as_str(), Span::call_site());
-    let mut default_variants  = variants.iter().filter(|v| v.id.is_none());
+    let mut default_variants = variants.iter().filter(|v| v.id.is_none());
 
     // Print some pretty messages for otherwise hard-to-debug problems
     let default_variant = default_variants.next().expect(
         "Default variant must be defined. E.g:\n\
                 \t#[attr(ID = _)]\n\
-                Unknown");
+                Unknown",
+    );
     if let Some(..) = default_variants.next() {
         panic!("Only one variant with default ID (_) can be defined.");
     }
@@ -340,13 +471,10 @@ pub fn enum_parse(attr: proc_macro::TokenStream, input: proc_macro::TokenStream)
     let parse_input_type = args.internal_attrs.parse_input;
 
     // Gather non-default variant names
-    let variant_names: Vec<&Ident> = variants.iter().filter_map(|v| {
-        if v.id.is_some() {
-            Some(&v.name)
-        } else {
-            None
-        }
-    }).collect();
+    let variant_names: Vec<&Ident> = variants
+        .iter()
+        .filter_map(|v| if v.id.is_some() { Some(&v.name) } else { None })
+        .collect();
 
     let mut ret_stream = quote! {
         #(#enum_attrs)*
@@ -357,7 +485,7 @@ pub fn enum_parse(attr: proc_macro::TokenStream, input: proc_macro::TokenStream)
         }
 
         impl #enum_ident {
-            fn parse(data: #parse_input_type, id: usize) -> Option<Self> {
+            pub fn parse(data: #parse_input_type, id: usize) -> Option<Self> {
                 match id {
                     #(#variant_names :: ID =>
                         #variant_names :: #parse_fn (data).map(|s| Self :: #variant_names (s))
