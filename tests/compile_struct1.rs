@@ -9,13 +9,16 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
              repr(C, packed),
              attr(parse_fn = read_from))]
 pub enum Payload {
+    #[attr(ID = 0x2b)]
     Hello { a: u8, b: u64, c: u64, d: u8 },
+    #[attr(ID = 0x42)]
     Goodbye { a: u8, e: u8 },
+    #[attr(ID = _)]
+    Invalid,
 }
 
 #[test]
-fn impl_test() {
-    let _ = Hello::ID;
-    let hello: Hello = Hello::default();
-    println!("std::mem::size_of<Hello> = {}; object = {hello:?}", std::mem::size_of_val(&hello));
+fn compile_struct1() {
+    assert_eq!(Hello::ID, 0x2b);
+    assert_eq!(std::mem::size_of::<Hello>(), 18);
 }

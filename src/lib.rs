@@ -9,15 +9,89 @@ extern crate quote;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Group, Ident, Span, TokenTree};
-use syn::{parse_quote, Attribute, Field};
+use syn::{parse_quote, Attribute, Field, Variant, Meta};
 
-/// Enum variant extracted from the original enum
+/// Enum variant extracted from the original enum.
+/// id == None means the default case
 #[derive(Debug)]
 struct EnumVariant {
-    id: usize,
+    id: Option<TokenTree>,
     name: Ident,
     fields: Vec<Field>,
 }
+
+impl TryFrom<Variant> for EnumVariant {
+    type Error = ();
+
+    fn try_from(variant: Variant) -> Result<Self, Self::Error> {
+        let name = variant.ident.clone();
+        let mut attrs = variant.attrs;
+        let fields = variant.fields.into_iter().collect();
+
+        // Parse variant's attributes
+        let internal_attrs_idx = attrs.iter().position(|a| match &a.meta {
+            Meta::List(list) => {
+                if let Some(ident) = list.path.get_ident() {
+                    ident.to_string() == "attr"
+                } else {
+                    false
+                }
+            },
+            _ => false
+        }).expect("Each enum variant needs to be have an attr attribute. #[attr(ID = 0x42)]");
+        let internal_attrs = attrs.remove(internal_attrs_idx);
+        let Meta::List(internal_attrs) = internal_attrs.meta else {
+            panic!("`attr` attribute needs to describe a list. E.g: #[attr(ID = 0x42)]");
+        };
+
+        let mut tokens_iter = internal_attrs.tokens.into_iter();
+        let mut id: Option<Option<TokenTree>> = None;
+
+        loop {
+            let Some(token) = tokens_iter.next() else {
+                break;
+            };
+
+            let TokenTree::Ident(ident) = token else {
+                continue;
+            };
+
+            match ident.to_string().as_str() {
+                "ID" => {
+                    expect_punct_token(tokens_iter.next());
+                    let value = tokens_iter.next().expect("Unknown attr syntax. Expected `#[attr(ID = 0x42)]`");
+
+                    id = Some(match &value {
+                        TokenTree::Ident(ident) => {
+                            if ident.to_string() == "_" {
+                                // The `default` case
+                                None
+                            } else {
+                                Some(value)
+                            }
+                        }
+                        _ => Some(value)
+                    });
+                }
+                name => {
+                    panic!("Unknown attribute `{name}`")
+                }
+            }
+        }
+
+        if attrs.len() > 1 {
+            panic!("Currently additional variant attributes are not supported");
+        }
+
+        let id = id.expect("Missing ID identifier.Each enum variant needs to be assigned an ID. #[attr(ID = 0x42)]");
+        Ok(EnumVariant {
+            id,
+            name,
+            fields,
+        })
+    }
+}
+
 
 /// Argument to #[enum_parse(...)] macro that will be passed 1:1
 /// to generated structs. Can be derive(Debug) or just e.g. no_mangle,
@@ -143,12 +217,11 @@ impl TryFrom<proc_macro2::TokenStream> for EnumParseArgs {
         let internal_attrs = attrs
             .iter()
             .position(|a| a.ident.to_string() == "attr")
-            .map(|idx| {
+            .and_then(|idx| {
                 let attr = attrs.remove(idx);
                 attr.group
                     .map(|g| EnumInternalAttributes::try_from(g.stream()))
             })
-            .flatten()
             .unwrap_or(Ok(EnumInternalAttributes::default()))?;
 
         Ok(EnumParseArgs {
@@ -177,45 +250,78 @@ pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
     // Organize info about variants
     let variants: Vec<EnumVariant> = variants
         .into_iter()
-        .map(|variant| {
-            let name = variant.ident.clone();
-
+        .map(|mut variant| {
             // set visibility to each field
-            let fields: Vec<Field> = variant
-                .fields
-                .into_iter()
-                .map(|mut field| {
-                    field.vis = enum_vis.clone();
-                    field
-                })
-                .collect();
-
-            EnumVariant {
-                id: 0,
-                name,
-                fields,
+            for f in &mut variant.fields {
+                f.vis = enum_vis.clone();
             }
+            EnumVariant::try_from(variant)
         })
-        .collect();
+        .collect::<Result<Vec<EnumVariant>, _>>().unwrap();
 
     // Re-create the original enum, now referencing soon-to-be-created structs
     // Also define the parsing method
     let parse_fn = Ident::new(args.internal_attrs.parse_fn.as_str(), Span::call_site());
-    let variant_names: Vec<&Ident> = variants.iter().map(|v| &v.name).collect();
+    let mut default_variants  = variants.iter().filter(|v| v.id.is_none());
+
+    // Print some pretty messages for otherwise hard-to-debug problems
+    let default_variant = default_variants.next().expect(
+        "Default variant must be defined. E.g:\n\
+                \t#[attr(ID = _)]\n\
+                Unknown");
+    if let Some(..) = default_variants.next() {
+        panic!("Only one variant with default ID (_) can be defined.");
+    }
+
+    // Build tokens for the default variant, differentiating between
+    // variant with fields (which is parsed), or variant without fields
+    // (which is simply returned from the parse function)
+    let default_variant_name = &default_variant.name;
+    let default_variant_has_fields = default_variant.fields.len() > 0;
+    let default_variant_match_case = if default_variant_has_fields {
+        quote!(
+            #default_variant_name :: #parse_fn (data).map(|s| Self :: #default_variant_name (s))
+        )
+    } else {
+        quote!(
+            Some(Self :: #default_variant_name)
+        )
+    };
+    let default_variant_enum: proc_macro2::TokenStream = if default_variant_has_fields {
+        quote!(
+            #default_variant_name (#default_variant_name)
+        )
+    } else {
+        quote!(
+            #default_variant_name
+        )
+    };
+
+    // Gather non-default variant names
+    let variant_names: Vec<&Ident> = variants.iter().filter_map(|v| {
+        if v.id.is_some() {
+            Some(&v.name)
+        } else {
+            None
+        }
+    }).collect();
+
     let mut ret_stream = quote! {
         #(#enum_attrs)*
         #enum_vis enum #enum_ident {
-            #(#variant_names(#variant_names)),*
+            #(#variant_names (#variant_names)),*
+            ,
+            #default_variant_enum
         }
 
         impl #enum_ident {
             fn parse(data: &[u8], id: usize) -> Option<Self> {
                 match id {
-                    #(#variant_names ::ID => {
-                        #variant_names :: #parse_fn (data).map(|s| Self:: #variant_names (s))
-                    }),*
+                    #(#variant_names :: ID =>
+                        #variant_names :: #parse_fn (data).map(|s| Self :: #variant_names (s))
+                    ),*
                     ,
-                    _ => panic!()
+                    _ => #default_variant_match_case
                 }
             }
         }
@@ -241,16 +347,21 @@ pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
     // For each EnumVariant generate a struct and its impl
     for v in variants {
         let EnumVariant { id, name, fields } = &v;
+
         ret_stream.extend::<proc_macro2::TokenStream>(quote! {
             #(#attributes)*
             #enum_vis struct #name {
                 #(#fields,)*
             }
-
-            impl #name {
-                pub const ID: usize = #id;
-            }
         });
+
+        if let Some(id) = id {
+            ret_stream.extend::<proc_macro2::TokenStream>(quote! {
+                impl #name {
+                    pub const ID: usize = #id;
+                }
+            });
+        }
     }
 
     ret_stream.into()
