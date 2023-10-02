@@ -7,7 +7,7 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 #[enum_parse(derive(Debug, Default, FromBytes, AsBytes, FromZeroes),
              repr(C, packed),
-             attr(parse_fn = read_from))]
+             attr(parse_input = &[u8], parse_fn = read_from))]
 pub enum Payload {
     #[attr(ID = 0x2b)]
     Hello { a: u8, b: u64, c: u64, d: u8 },

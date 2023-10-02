@@ -7,8 +7,9 @@ extern crate syn;
 #[macro_use]
 extern crate quote;
 
-use proc_macro::TokenStream;
-use proc_macro2::{Group, Ident, Span, TokenTree};
+use std::str::FromStr;
+
+use proc_macro2::{Group, Ident, Span, TokenTree, TokenStream};
 use syn::{parse_quote, Attribute, Field, Variant, Meta};
 
 /// Enum variant extracted from the original enum.
@@ -105,12 +106,14 @@ struct EnumAttribute {
 /// Parsed attr(...) argument from #[enum_parse(..., attr(...)] macro
 #[derive(Debug)]
 struct EnumInternalAttributes {
+    parse_input: TokenStream,
     parse_fn: String,
 }
 
 impl Default for EnumInternalAttributes {
     fn default() -> Self {
         Self {
+            parse_input: TokenStream::from_str("&[u8]").unwrap(),
             parse_fn: "parse".into(),
         }
     }
@@ -127,14 +130,46 @@ fn expect_punct_token(token: Option<TokenTree>) {
     }
 }
 
+fn consume_tokens_until_comma<I: Iterator<Item = TokenTree>>(tokens_iter: &mut I) -> TokenStream {
+    let mut consumed: Vec<TokenTree> = Vec::new();
+    let mut depth: usize = 0;
+
+    loop {
+        let Some(token) = tokens_iter.next() else {
+            // end of input
+            break;
+        };
+
+        if let TokenTree::Punct(ref punct) = token {
+            match punct.as_char() {
+                '<' => {
+                    depth = depth.checked_add(1).unwrap();
+                },
+                '>' => {
+                    depth = depth.checked_sub(1).unwrap();
+                },
+                ',' => {
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        consumed.push(token);
+    }
+
+    quote!(#(#consumed)*)
+}
+
 /// Parse attr() argument in #[enum_parse(..., attr(parse_fn = my_fn))]
 /// We could technically use syn to consume the input and parse it for us,
 /// but since we already parsed raw tokens in EnumParseArgs, do it here
 /// as well.
-impl TryFrom<proc_macro2::TokenStream> for EnumInternalAttributes {
+impl TryFrom<TokenStream> for EnumInternalAttributes {
     type Error = ();
 
-    fn try_from(tokens: proc_macro2::TokenStream) -> Result<Self, Self::Error> {
+    fn try_from(tokens: TokenStream) -> Result<Self, Self::Error> {
         let mut tokens_iter = tokens.into_iter();
         let mut ret = EnumInternalAttributes::default();
 
@@ -148,6 +183,11 @@ impl TryFrom<proc_macro2::TokenStream> for EnumInternalAttributes {
             };
 
             match ident.to_string().as_str() {
+                "parse_input" => {
+                    expect_punct_token(tokens_iter.next());
+                    ret.parse_input = consume_tokens_until_comma(&mut tokens_iter);
+                    // unfortunately we can't provide any type-checking at this stage
+                }
                 "parse_fn" => {
                     expect_punct_token(tokens_iter.next());
                     let Some(TokenTree::Ident(value)) = tokens_iter.next() else {
@@ -176,10 +216,10 @@ struct EnumParseArgs {
 /// part of arguments are getting parsed, the rest is technically invalid syntax
 /// until it's wrapped in #[] and used to decorate a struct.
 /// For that reason, we don't try to parse it yet.
-impl TryFrom<proc_macro2::TokenStream> for EnumParseArgs {
+impl TryFrom<TokenStream> for EnumParseArgs {
     type Error = ();
 
-    fn try_from(tokens: proc_macro2::TokenStream) -> Result<Self, Self::Error> {
+    fn try_from(tokens: TokenStream) -> Result<Self, Self::Error> {
         let mut tokens_iter = tokens.into_iter();
         let mut attrs: Vec<EnumAttribute> = Vec::new();
 
@@ -232,8 +272,8 @@ impl TryFrom<proc_macro2::TokenStream> for EnumParseArgs {
 }
 
 #[proc_macro_attribute]
-pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
-    let attr: proc_macro2::TokenStream = attr.into();
+pub fn enum_parse(attr: proc_macro::TokenStream, input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let attr: TokenStream = attr.into();
     let args: EnumParseArgs = attr.try_into().unwrap();
 
     let ast = syn::parse_macro_input!(input as syn::DeriveInput);
@@ -287,7 +327,7 @@ pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
             Some(Self :: #default_variant_name)
         )
     };
-    let default_variant_enum: proc_macro2::TokenStream = if default_variant_has_fields {
+    let default_variant_enum: TokenStream = if default_variant_has_fields {
         quote!(
             #default_variant_name (#default_variant_name)
         )
@@ -296,6 +336,8 @@ pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
             #default_variant_name
         )
     };
+
+    let parse_input_type = args.internal_attrs.parse_input;
 
     // Gather non-default variant names
     let variant_names: Vec<&Ident> = variants.iter().filter_map(|v| {
@@ -315,7 +357,7 @@ pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         impl #enum_ident {
-            fn parse(data: &[u8], id: usize) -> Option<Self> {
+            fn parse(data: #parse_input_type, id: usize) -> Option<Self> {
                 match id {
                     #(#variant_names :: ID =>
                         #variant_names :: #parse_fn (data).map(|s| Self :: #variant_names (s))
@@ -348,7 +390,7 @@ pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
     for v in variants {
         let EnumVariant { id, name, fields } = &v;
 
-        ret_stream.extend::<proc_macro2::TokenStream>(quote! {
+        ret_stream.extend(quote! {
             #(#attributes)*
             #enum_vis struct #name {
                 #(#fields,)*
@@ -356,7 +398,7 @@ pub fn enum_parse(attr: TokenStream, input: TokenStream) -> TokenStream {
         });
 
         if let Some(id) = id {
-            ret_stream.extend::<proc_macro2::TokenStream>(quote! {
+            ret_stream.extend(quote! {
                 impl #name {
                     pub const ID: usize = #id;
                 }
