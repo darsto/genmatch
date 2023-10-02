@@ -2,6 +2,8 @@
  * Copyright(c) 2023 Darek Stojaczyk
  */
 
+#![doc = include_str!("../README.md")]
+
 extern crate proc_macro;
 extern crate syn;
 #[macro_use]

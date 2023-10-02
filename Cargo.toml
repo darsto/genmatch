@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Darek Stojaczyk <darek@stojaczyk.pl>"]
 repository = "https://github.com/darsto/enum_parse"
+readme = "README.md"
 keywords = ["enum", "macro", "attribute", "parser", "serialization"]
 categories = ["parsing", "rust-patterns"]
 license = "MIT"
