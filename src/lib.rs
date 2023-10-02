@@ -11,6 +11,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Group, Ident, Span, TokenTree};
 use syn::{parse_quote, Attribute, Field};
 
+/// Enum variant extracted from the original enum
 #[derive(Debug)]
 struct EnumVariant {
     id: usize,
@@ -18,12 +19,16 @@ struct EnumVariant {
     fields: Vec<Field>,
 }
 
+/// Argument to #[enum_parse(...)] macro that will be passed 1:1
+/// to generated structs. Can be derive(Debug) or just e.g. no_mangle,
+/// so the group is optional.
 #[derive(Debug)]
 struct EnumAttribute {
     ident: Ident,
     group: Option<Group>,
 }
 
+/// Parsed attr(...) argument from #[enum_parse(..., attr(...)] macro
 #[derive(Debug)]
 struct EnumInternalAttributes {
     parse_fn: String,
@@ -48,6 +53,10 @@ fn expect_punct_token(token: Option<TokenTree>) {
     }
 }
 
+/// Parse attr() argument in #[enum_parse(..., attr(parse_fn = my_fn))]
+/// We could technically use syn to consume the input and parse it for us,
+/// but since we already parsed raw tokens in EnumParseArgs, do it here
+/// as well.
 impl TryFrom<proc_macro2::TokenStream> for EnumInternalAttributes {
     type Error = ();
 
@@ -82,12 +91,17 @@ impl TryFrom<proc_macro2::TokenStream> for EnumInternalAttributes {
     }
 }
 
+/// All arguments passed to #[enum_parse(...)] macro
 #[derive(Debug)]
 struct EnumParseArgs {
     struct_attrs: Vec<EnumAttribute>,
     internal_attrs: EnumInternalAttributes,
 }
 
+/// Organize enum_parse macro arguments into a struct. Note that only a small
+/// part of arguments are getting parsed, the rest is technically invalid syntax
+/// until it's wrapped in #[] and used to decorate a struct.
+/// For that reason, we don't try to parse it yet.
 impl TryFrom<proc_macro2::TokenStream> for EnumParseArgs {
     type Error = ();
 
@@ -96,22 +110,27 @@ impl TryFrom<proc_macro2::TokenStream> for EnumParseArgs {
         let mut attrs: Vec<EnumAttribute> = Vec::new();
 
         loop {
+            // The macro argument can be derive(Debug) - with brackets,
+            // or without them - e.g. no_mangle
             let Some(ident) = tokens_iter.next() else {
                 break;
             };
             let TokenTree::Ident(ident) = ident else {
-                panic!("Malformed syntax. Expected Ident");
+                panic!("Malformed #[enum_parse(...)] syntax. Expected Ident. Example: \n\
+                        \t#[enum_parse(derive(Debug, Default), \n\
+                        \t\trepr(C, packed), \n\
+                        \t\tattr(parse_fn = my_fn))]");
             };
 
             let group = match tokens_iter.next() {
                 Some(TokenTree::Group(group)) => {
                     let group = group.clone();
-                    // skip the following comma
+                    // skip the following comma (or nothing)
                     tokens_iter.next();
                     Some(group)
                 }
                 _ => {
-                    // we consumed a comma
+                    // we consumed a comma (or nothing)
                     None
                 }
             };
@@ -119,6 +138,8 @@ impl TryFrom<proc_macro2::TokenStream> for EnumParseArgs {
             attrs.push(EnumAttribute { ident, group });
         }
 
+        // Extract attr() argument and parse it as internal argument.
+        // It's removed from the original arguments vector.
         let internal_attrs = attrs
             .iter()
             .position(|a| a.ident.to_string() == "attr")

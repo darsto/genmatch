@@ -5,7 +5,7 @@
 use enum_parse::*;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-#[enum_parse(derive(Debug, FromBytes, AsBytes, FromZeroes),
+#[enum_parse(derive(Debug, Default, FromBytes, AsBytes, FromZeroes),
              repr(C, packed),
              attr(parse_fn = read_from))]
 pub enum Payload {
@@ -16,4 +16,6 @@ pub enum Payload {
 #[test]
 fn impl_test() {
     let _ = Hello::ID;
+    let hello: Hello = Hello::default();
+    println!("std::mem::size_of<Hello> = {}; object = {hello:?}", std::mem::size_of_val(&hello));
 }
