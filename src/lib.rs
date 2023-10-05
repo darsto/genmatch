@@ -15,11 +15,16 @@ use proc_macro2::{Group, Ident, Span, TokenStream, TokenTree};
 use syn::{parse_quote, Attribute, Field, Meta, Variant};
 
 /// Enum variant extracted from the original enum.
-/// id == None means the default case
 struct EnumVariant {
-    id: Option<TokenTree>,
+    id: EnumId,
     name: Ident,
     fields: Vec<Field>,
+}
+
+enum EnumId {
+    Val(TokenTree),
+    /// Default match case
+    Default,
 }
 
 impl TryFrom<Variant> for EnumVariant {
@@ -50,7 +55,7 @@ impl TryFrom<Variant> for EnumVariant {
         };
 
         let mut tokens_iter = internal_attrs.tokens.into_iter();
-        let mut id: Option<Option<TokenTree>> = None;
+        let mut id: Option<EnumId> = None;
 
         loop {
             let Some(token) = tokens_iter.next() else {
@@ -71,13 +76,12 @@ impl TryFrom<Variant> for EnumVariant {
                     id = Some(match &value {
                         TokenTree::Ident(ident) => {
                             if ident.to_string() == "_" {
-                                // The `default` case
-                                None
+                                EnumId::Default
                             } else {
-                                Some(value)
+                                EnumId::Val(value)
                             }
                         }
-                        _ => Some(value),
+                        _ => EnumId::Val(value),
                     });
                 }
                 name => {
@@ -434,7 +438,7 @@ pub fn enum_parse(
     // Re-create the original enum, now referencing soon-to-be-created structs
     // Also define the parsing method
     let parse_fn = Ident::new(args.internal_attrs.parse_fn.as_str(), Span::call_site());
-    let mut default_variants = variants.iter().filter(|v| v.id.is_none());
+    let mut default_variants = variants.iter().filter(|v| matches!(v.id, EnumId::Default));
 
     // Print some pretty messages for otherwise hard-to-debug problems
     let default_variant = default_variants.next().expect(
@@ -475,7 +479,13 @@ pub fn enum_parse(
     // Gather non-default variant names
     let variant_names: Vec<&Ident> = variants
         .iter()
-        .filter_map(|v| if v.id.is_some() { Some(&v.name) } else { None })
+        .filter_map(|v| {
+            if matches!(v.id, EnumId::Val(..)) {
+                Some(&v.name)
+            } else {
+                None
+            }
+        })
         .collect();
 
     let mut ret_stream = quote! {
@@ -527,7 +537,7 @@ pub fn enum_parse(
             }
         });
 
-        if let Some(id) = id {
+        if let EnumId::Val(id) = id {
             ret_stream.extend(quote! {
                 impl #name {
                     pub const ID: usize = #id;
