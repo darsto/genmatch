@@ -12,6 +12,7 @@ extern crate quote;
 use std::str::FromStr;
 
 use proc_macro2::{Group, Ident, Span, TokenStream, TokenTree};
+use quote::{ToTokens, TokenStreamExt};
 use syn::{parse_quote, Attribute, Field, Meta, Variant};
 
 /// Enum variant extracted from the original enum.
@@ -21,10 +22,100 @@ struct EnumVariant {
     fields: Vec<Field>,
 }
 
+/// ToTokens in the final (generated) enum.
+impl ToTokens for EnumVariant {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let name = &self.name;
+        tokens.extend(quote! {
+            #name (#name)
+        })
+    }
+}
+
 enum EnumId {
+    /// Regular match case
     Val(TokenTree),
     /// Default match case
     Default,
+}
+
+impl ToTokens for EnumId {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            EnumId::Val(token) => tokens.append(token.clone()),
+            EnumId::Default => tokens.append(Ident::new("_", Span::call_site())),
+        }
+    }
+}
+
+struct EnumVariantMatch<'a> {
+    enum_name: &'a Ident,
+    variant: &'a EnumVariant,
+    case: &'a TokenStream,
+}
+
+impl<'a> ToTokens for EnumVariantMatch<'a> {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let enum_name = self.enum_name;
+        let name = &self.variant.name;
+        let id = &self.variant.id;
+        let case = self.case;
+
+        tokens.extend({
+            quote! {
+                #id => {
+                    use #name as EnumStructType;
+                    use #enum_name :: #name as EnumVariantType;
+                    #case
+                },
+            }
+        });
+    }
+}
+
+struct EnumVariantMatcher<'a> {
+    enum_name: &'a Ident,
+    variants: &'a Vec<EnumVariant>,
+    case: TokenStream,
+}
+
+impl<'a> ToTokens for EnumVariantMatcher<'a> {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let mut default_variants = self
+            .variants
+            .iter()
+            .filter(|v| matches!(v.id, EnumId::Default));
+
+        // Print some pretty messages for otherwise hard-to-debug problems
+        let default_variant = default_variants.next().expect(
+            "Default variant must be defined. E.g:\n\
+                    \t#[attr(ID = _)]\n\
+                    Unknown",
+        );
+        if let Some(..) = default_variants.next() {
+            panic!("Only one variant with default ID (_) can be defined.");
+        }
+
+        for variant in self.variants {
+            if let EnumId::Default = variant.id {
+                continue;
+            }
+
+            let m = EnumVariantMatch {
+                enum_name: self.enum_name,
+                variant,
+                case: &self.case,
+            };
+            m.to_tokens(tokens);
+        }
+
+        let m = EnumVariantMatch {
+            enum_name: self.enum_name,
+            variant: default_variant,
+            case: &self.case,
+        };
+        m.to_tokens(tokens);
+    }
 }
 
 impl TryFrom<Variant> for EnumVariant {
@@ -162,7 +253,7 @@ fn consume_tokens_until_comma<I: Iterator<Item = TokenTree>>(tokens_iter: &mut I
         consumed.push(token);
     }
 
-    quote!(#(#consumed)*)
+    quote! { #(#consumed)* }
 }
 
 /// Parse attr() argument in #[enum_parse(..., attr(parse_fn = my_fn))]
@@ -423,7 +514,7 @@ pub fn enum_parse(
     };
 
     // Organize info about variants
-    let variants: Vec<EnumVariant> = variants
+    let variants = variants
         .into_iter()
         .map(|mut variant| {
             // set visibility to each field
@@ -436,80 +527,32 @@ pub fn enum_parse(
         .unwrap();
 
     // Re-create the original enum, now referencing soon-to-be-created structs
-    // Also define the parsing method
-    let parse_fn = Ident::new(args.internal_attrs.parse_fn.as_str(), Span::call_site());
-    let mut default_variants = variants.iter().filter(|v| matches!(v.id, EnumId::Default));
-
-    // Print some pretty messages for otherwise hard-to-debug problems
-    let default_variant = default_variants.next().expect(
-        "Default variant must be defined. E.g:\n\
-                \t#[attr(ID = _)]\n\
-                Unknown",
-    );
-    if let Some(..) = default_variants.next() {
-        panic!("Only one variant with default ID (_) can be defined.");
-    }
-
-    // Build tokens for the default variant, differentiating between
-    // variant with fields (which is parsed), or variant without fields
-    // (which is simply returned from the parse function)
-    let default_variant_name = &default_variant.name;
-    let default_variant_has_fields = default_variant.fields.len() > 0;
-    let default_variant_match_case = if default_variant_has_fields {
-        quote!(
-            #default_variant_name :: #parse_fn (data).map(|s| Self :: #default_variant_name (s))
-        )
-    } else {
-        quote!(
-            Some(Self :: #default_variant_name)
-        )
-    };
-    let default_variant_enum: TokenStream = if default_variant_has_fields {
-        quote!(
-            #default_variant_name (#default_variant_name)
-        )
-    } else {
-        quote!(
-            #default_variant_name
-        )
-    };
-
     let parse_input_type = args.internal_attrs.parse_input;
-
-    // Gather non-default variant names
-    let variant_names: Vec<&Ident> = variants
-        .iter()
-        .filter_map(|v| {
-            if matches!(v.id, EnumId::Val(..)) {
-                Some(&v.name)
-            } else {
-                None
-            }
-        })
-        .collect();
-
     let mut ret_stream = quote! {
         #(#enum_attrs)*
         #enum_vis enum #enum_ident {
-            #(#variant_names (#variant_names)),*
-            ,
-            #default_variant_enum
-        }
-
-        impl #enum_ident {
-            pub fn parse(data: #parse_input_type, id: usize) -> Option<Self> {
-                match id {
-                    #(#variant_names :: ID =>
-                        #variant_names :: #parse_fn (data).map(|s| Self :: #variant_names (s))
-                    ),*
-                    ,
-                    _ => #default_variant_match_case
-                }
-            }
+            #(#variants),*
         }
     };
 
-    // Generate Attribute-s (this is the first time their syntax is checked)
+    // Also define the parsing method
+    let parse_fn = Ident::new(args.internal_attrs.parse_fn.as_str(), Span::call_site());
+    let variant_matcher = EnumVariantMatcher {
+        enum_name: &enum_ident,
+        variants: &variants,
+        case: quote!(EnumStructType :: #parse_fn (data).map(|s| EnumVariantType (s))),
+    };
+    ret_stream.extend(quote! {
+        impl #enum_ident {
+            pub fn parse(data: #parse_input_type, id: usize) -> Option<Self> {
+                match id {
+                    #variant_matcher
+                }
+            }
+        }
+    });
+
+    // Generate struct attributes (this is the first time their syntax is checked)
     let attributes: Vec<Attribute> = args
         .struct_attrs
         .into_iter()
