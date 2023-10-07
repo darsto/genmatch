@@ -1,25 +1,22 @@
 [package]
-name = "enum_parse"
+name = "enum_gen"
 version = "0.1.0"
 edition = "2021"
 authors = ["Darek Stojaczyk <darek@stojaczyk.pl>"]
-repository = "https://github.com/darsto/enum_parse"
+repository = "https://github.com/darsto/enum_gen"
 readme = "README.md"
 keywords = ["enum", "macro", "attribute", "parser", "serialization"]
 categories = ["parsing", "rust-patterns"]
 license = "MIT"
 description = """
-Procedural macro generating boilerplate code for parsing enum variants
+Procedural macro to generate structures from enum variants
 """
 
 [lib]
 proc-macro = true
-doctest = false
 
 [dependencies]
-proc-macro2 = "^1.0"
-quote = "^1.0"
-syn = { version = "^2.0" }
-
-[dev-dependencies]
-zerocopy = { version = "^0.7", features = ["derive"] }
+lazy_static = "1.4"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0" }

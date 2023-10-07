@@ -2,12 +2,9 @@
  * Copyright(c) 2023 Darek Stojaczyk
  */
 
-use enum_parse::*;
-use zerocopy::{AsBytes, FromBytes, FromZeroes};
+use enum_gen::*;
 
-#[enum_parse(derive(Debug, Default, FromBytes, AsBytes, FromZeroes),
-             repr(C, packed),
-             attr(parse_input = &[u8], parse_fn = read_from))]
+#[enum_gen(derive(Debug, Default), repr(C, packed))]
 pub enum Payload {
     #[attr(ID = 0x2b)]
     Hello { a: u8, b: u64, c: u64, d: u8 },
@@ -17,8 +14,14 @@ pub enum Payload {
     Invalid,
 }
 
-#[test]
-fn compile_struct1() {
-    assert_eq!(Hello::ID, 0x2b);
-    assert_eq!(std::mem::size_of::<Hello>(), 18);
+impl Payload {
+    #[enum_gen_impl(Payload)]
+    pub fn default(id: usize) -> Payload {
+        EnumVariantType(EnumStructType::default())
+    }
+
+    #[enum_gen_impl(Payload)]
+    pub fn size_of(id: usize) -> usize {
+        std::mem::size_of::<EnumStructType>()
+    }
 }
