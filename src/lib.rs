@@ -92,7 +92,7 @@ impl<'a> ToTokens for EnumVariantMatcher<'a> {
                     \t#[attr(ID = _)]\n\
                     Unknown",
         );
-        if let Some(..) = default_variants.next() {
+        if default_variants.next().is_some() {
             panic!("Only one variant with default ID (_) can be defined.");
         }
 
@@ -132,7 +132,7 @@ impl TryFrom<Variant> for EnumVariant {
             .position(|a| match &a.meta {
                 Meta::List(list) => {
                     if let Some(ident) = list.path.get_ident() {
-                        ident.to_string() == "attr"
+                        *ident == "attr"
                     } else {
                         false
                     }
@@ -166,7 +166,7 @@ impl TryFrom<Variant> for EnumVariant {
 
                     id = Some(match &value {
                         TokenTree::Ident(ident) => {
-                            if ident.to_string() == "_" {
+                            if *ident == "_" {
                                 EnumId::Default
                             } else {
                                 EnumId::Val(value)
@@ -351,7 +351,7 @@ impl TryFrom<TokenStream> for EnumParseArgs {
         // It's removed from the original arguments vector.
         let internal_attrs = attrs
             .iter()
-            .position(|a| a.ident.to_string() == "attr")
+            .position(|a| a.ident == "attr")
             .and_then(|idx| {
                 let attr = attrs.remove(idx);
                 attr.group
