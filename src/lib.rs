@@ -24,17 +24,17 @@ fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
     }
 }
 
-// State shared between #[enum_gen] and #[enum_gen_impl] calls
+// State shared between #[enum_gen] and #[enum_gen_match] calls
 struct GlobalState {
     enums: HashMap<String, EnumRef>,
-    pending_impls: HashMap<String, Vec<EnumImpl>>,
+    pending_match_fns: HashMap<String, Vec<EnumMatchFn>>,
 }
 
 impl GlobalState {
     pub fn new() -> Self {
         GlobalState {
             enums: HashMap::new(),
-            pending_impls: HashMap::new(),
+            pending_match_fns: HashMap::new(),
         }
     }
 }
@@ -91,7 +91,29 @@ impl ToTokens for EnumVariantId {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EnumMatchType {
+    /// Match by ID
+    Id,
+    /// Match by &self
+    Variant,
+}
+
+impl ToTokens for EnumMatchType {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match &self {
+            EnumMatchType::Id => {
+                tokens.append(Ident::new("id", Span::call_site()));
+            }
+            EnumMatchType::Variant => {
+                tokens.append(Ident::new("self", Span::call_site()));
+            }
+        };
+    }
+}
+
 struct EnumVariantMatch<'a> {
+    match_by: EnumMatchType,
     enum_name: &'a Ident,
     variant: &'a EnumVariantRef,
     case: &'a TokenStream,
@@ -105,11 +127,20 @@ impl<'a> ToTokens for EnumVariantMatch<'a> {
         let case = &self.case;
 
         tokens.extend({
-            quote! {
-                #id => {
-                    use #name as EnumStructType;
-                    use #enum_name::#name as EnumVariantType;
-                    #case
+            match self.match_by {
+                EnumMatchType::Id => quote! {
+                    #id => {
+                        use #name as EnumStructType;
+                        use #enum_name::#name as EnumVariantType;
+                        #case
+                    },
+                },
+                EnumMatchType::Variant => quote! {
+                    #enum_name::#name(inner) => {
+                        use #name as EnumStructType;
+                        use #enum_name::#name as EnumVariantType;
+                        #case
+                    },
                 },
             }
         });
@@ -117,6 +148,7 @@ impl<'a> ToTokens for EnumVariantMatch<'a> {
 }
 
 struct EnumVariantMatcher<'a> {
+    match_by: EnumMatchType,
     enum_name: &'a Ident,
     variants: &'a Vec<EnumVariantRef>,
     case: TokenStream,
@@ -145,6 +177,7 @@ impl<'a> ToTokens for EnumVariantMatcher<'a> {
             }
 
             let m = EnumVariantMatch {
+                match_by: self.match_by,
                 enum_name: self.enum_name,
                 variant,
                 case: &self.case,
@@ -153,6 +186,7 @@ impl<'a> ToTokens for EnumVariantMatcher<'a> {
         }
 
         let m = EnumVariantMatch {
+            match_by: self.match_by,
             enum_name: self.enum_name,
             variant: default_variant,
             case: &self.case,
@@ -314,7 +348,7 @@ impl TryFrom<TokenStream> for EnumGenArgs {
 
 /// Procedural macro to generate structures from enum variants. The variants can
 /// be assigned a numerical ID, which can be automatically matched by functions
-/// attributed with #[`enum_gen_impl`].
+/// attributed with #[`enum_gen_match_id`].
 ///
 /// The enum variants must have either named data (struct like) or no data at all.
 ///
@@ -371,7 +405,7 @@ impl TryFrom<TokenStream> for EnumGenArgs {
 /// ```
 ///
 /// The IDs aren't particularly useful on their own, but can be grealy leveraged
-/// with another #[enum_gen_impl] proc macro.  See its documentation for details.
+/// with another #[enum_gen_match_id] proc macro.  See its documentation for details.
 #[proc_macro_attribute]
 pub fn enum_gen(
     attr: proc_macro::TokenStream,
@@ -472,11 +506,13 @@ pub fn enum_gen(
             // like caller's module instead.
             drop(cache);
             panic!("Enum name conflict! Consider using a different unique name, then create an alias to desired name");
-        } else if let Some(pending_impls) = cache.pending_impls.remove(&enum_ident.to_string()) {
+        } else if let Some(pending_match_fns) =
+            cache.pending_match_fns.remove(&enum_ident.to_string())
+        {
             let enumref = cache.enums.get(&enum_ident.to_string()).unwrap();
 
-            for pending in pending_impls {
-                enum_gen_impl_with_enum(enumref, &pending);
+            for pending in pending_match_fns {
+                enum_gen_match_with_enum(enumref, &pending);
             }
         }
     } else {
@@ -486,15 +522,19 @@ pub fn enum_gen(
     ret_stream.into()
 }
 
-/// Parsed #[enum_gen_impl(...)]. In case the enum definition is not available,
+/// Parsed #[enum_gen_match[_id](...)]. In case the enum definition is not available,
 /// and the impl needs to be stored in the global state.
-struct EnumImpl {
+struct EnumMatchFn {
+    match_by: EnumMatchType,
     fn_str: String,
 }
 
-fn enum_gen_impl_with_enum(enumref: &EnumRef, enum_impl: &EnumImpl) -> proc_macro2::TokenStream {
+fn enum_gen_match_with_enum(
+    enumref: &EnumRef,
+    enum_match_fn: &EnumMatchFn,
+) -> proc_macro2::TokenStream {
     let enum_name = Ident::new(&enumref.name, Span::call_site());
-    let mut tokens: Vec<TokenTree> = proc_macro2::TokenStream::from_str(&enum_impl.fn_str)
+    let mut tokens: Vec<TokenTree> = proc_macro2::TokenStream::from_str(&enum_match_fn.fn_str)
         .unwrap()
         .into_iter()
         .collect();
@@ -509,25 +549,56 @@ fn enum_gen_impl_with_enum(enumref: &EnumRef, enum_impl: &EnumImpl) -> proc_macr
                 None
             }
         })
-        .expect("#[enum_gen_impl(..)] has to be used on function definition");
+        .expect("#[enum_gen_match[_id](...)] has to be used on function definition");
 
     let variant_matcher = EnumVariantMatcher {
+        match_by: enum_match_fn.match_by,
         enum_name: &enum_name,
         variants: &enumref.variants,
         case: body,
     };
+
+    let match_by = &variant_matcher.match_by;
     quote!(
         #(#tokens)* {
-            match id {
+            match #match_by {
                 #variant_matcher
             }
         }
     )
 }
 
+fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro::TokenStream {
+    if enum_name.is_empty() {
+        panic!("Argument is missing. Expected `#[enum_gen_match(MyEnumName)]`");
+    }
+
+    let mut cache = CACHE.lock().unwrap();
+    if let Some(enumref) = cache.enums.get(&enum_name) {
+        enum_gen_match_with_enum(enumref, &enum_match_fn).into()
+    } else {
+        // We may be called before #[enum_gen], so handle it by storing
+        // this (stringified) function into cache. Unfortunately we don't
+        // know if the enum exists at all. If it doesn't, this function
+        // won't be ever instantiated, and won't generate any warning.
+        let pending_vec = cache
+            .pending_match_fns
+            .entry(enum_name)
+            .or_insert(Vec::new());
+        pending_vec.push(enum_match_fn);
+        proc_macro::TokenStream::new()
+    }
+}
+
 /// Provide EnumStructType and EnumVariantType aliases to the function body,
 /// which correspond to enum variant with provided `id`. The `id` is expected
 /// to be one of the function parameters.
+///
+/// This works by replacing the function body with an `id` match expression,
+/// where every match arm is filled with the original body, just preceeded with
+/// different `use X as EnumStructType`. For this reason it's recommended to
+/// keep the function body minimal, potentially separating the generic logic to
+/// another helper function: `fn inner_logic_not_worth_duplicating<T: MyTrait>(v: &T)`.
 ///
 /// # Examples
 /// ```rust
@@ -543,7 +614,7 @@ fn enum_gen_impl_with_enum(enumref: &EnumRef, enum_impl: &EnumImpl) -> proc_macr
 ///     Invalid,
 /// }
 ///
-/// #[enum_gen_impl(Payload)]
+/// #[enum_gen_match_id(Payload)]
 /// pub fn default(id: usize) -> Payload {
 ///     EnumVariantType(EnumStructType::default())
 /// }
@@ -573,27 +644,85 @@ fn enum_gen_impl_with_enum(enumref: &EnumRef, enum_impl: &EnumImpl) -> proc_macr
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn enum_gen_impl(
+pub fn enum_gen_match_id(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let attr: TokenStream = attr.into();
     let enum_name = attr.to_string();
 
-    let enum_impl = EnumImpl {
+    let enum_match_fn = EnumMatchFn {
+        match_by: EnumMatchType::Id,
         fn_str: input.to_string(),
     };
 
-    let mut cache = CACHE.lock().unwrap();
-    if let Some(enumref) = cache.enums.get(&enum_name) {
-        enum_gen_impl_with_enum(enumref, &enum_impl).into()
-    } else {
-        // We may be called before #[enum_gen], so handle it by storing
-        // this (stringified) function into cache. Unfortunately we don't
-        // know if the enum exists at all. If it doesn't, this function
-        // won't be ever instantiated, and won't generate any warning.
-        let pending_vec = cache.pending_impls.entry(enum_name).or_insert(Vec::new());
-        pending_vec.push(enum_impl);
-        proc_macro::TokenStream::new()
-    }
+    process_match_fn(enum_name, enum_match_fn)
+}
+
+/// Similar to #[`enum_gen_match_id`], but matches on `self` instead.
+/// The inner structure of variant is available through `inner` variable.
+/// This macro can be used on function with either `self`, `&self` or
+/// `&mut self` parameter.
+///
+/// # Examples
+/// ```rust
+/// use enum_gen::*;
+///
+/// #[enum_gen(derive(Debug, Default), repr(C, packed))]
+/// pub enum Payload {
+///     #[attr(ID = 0x2b)]
+///     Hello { a: u8, b: u64, c: u64, d: u8 },
+///     #[attr(ID = 0x42)]
+///     Goodbye { a: u8, e: u8 },
+///     #[attr(ID = _)]
+///     Invalid,
+/// }
+///
+/// impl Payload {
+///     #[enum_gen_match_self(Payload)]
+///     pub fn size(&self) -> usize {
+///         std::mem::size_of_val(inner)
+///     }
+/// }
+/// ```
+///
+/// The `size` function expands to:
+///
+/// ```ignore
+/// impl Payload {
+///     pub fn size(&self) -> usize {
+///         match &self {
+///             Payload::Hello(inner) => {
+///                 use Hello as EnumStructType;
+///                 use Payload::Hello as EnumVariantType;
+///                 std::mem::size_of_val(inner)
+///             }
+///             Payload::Goodbye(inner) => {
+///                 use Goodbye as EnumStructType;
+///                 use Payload::Goodbye as EnumVariantType;
+///                 std::mem::size_of_val(inner)
+///             }
+///             Payload::Invalid(inner) => {
+///                 use Invalid as EnumStructType;
+///                 use Payload::Invalid as EnumVariantType;
+///                 std::mem::size_of_val(inner)
+///             }
+///         }
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn enum_gen_match_self(
+    attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let attr: TokenStream = attr.into();
+    let enum_name = attr.to_string();
+
+    let enum_match_fn = EnumMatchFn {
+        match_by: EnumMatchType::Variant,
+        fn_str: input.to_string(),
+    };
+
+    process_match_fn(enum_name, enum_match_fn)
 }
