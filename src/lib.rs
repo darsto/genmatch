@@ -477,6 +477,7 @@ pub fn enum_gen(
         if let EnumVariantId::Val(id) = id {
             ret_stream.extend(quote! {
                 impl #name {
+                    #[allow(dead_code)]
                     pub const ID: usize = #id;
                 }
             });
