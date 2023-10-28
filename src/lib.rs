@@ -13,7 +13,7 @@ use lazy_static::lazy_static;
 use proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
 use std::{collections::HashMap, str::FromStr, sync::Mutex};
-use syn::{parse_quote, Attribute, Field, Meta, Variant};
+use syn::{parse_quote, Attribute, Field, Meta, Path, Type, Variant};
 
 #[allow(clippy::from_str_radix_10)]
 fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
@@ -24,7 +24,7 @@ fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
     }
 }
 
-// State shared between #[enum_gen] and #[enum_gen_match] calls
+// State shared between #[enum_match] and #[enum_match_<id|self>] calls
 struct GlobalState {
     enums: HashMap<String, EnumRef>,
     pending_match_fns: HashMap<String, Vec<EnumMatchFn>>,
@@ -61,7 +61,7 @@ struct EnumVariantRef {
 struct EnumVariant {
     id: EnumVariantId,
     name: Ident,
-    fields: Vec<Field>,
+    struct_name: Path,
 }
 
 /// ToTokens into the final (generated) enum.
@@ -78,6 +78,8 @@ impl ToTokens for EnumVariant {
 enum EnumVariantId {
     /// Regular match case
     Val(usize),
+    /// No ID provided - expect it to be provided externally
+    /// TODO: None,
     /// Default match case
     Default,
 }
@@ -201,7 +203,25 @@ impl TryFrom<Variant> for EnumVariant {
     fn try_from(variant: Variant) -> Result<Self, Self::Error> {
         let name = variant.ident.clone();
         let mut attrs = variant.attrs;
-        let fields = variant.fields.into_iter().collect();
+        let struct_name =
+            match variant.fields {
+                syn::Fields::Named(..) => None,
+                syn::Fields::Unnamed(struct_name) => struct_name
+                    .unnamed
+                    .into_iter()
+                    .next()
+                    .and_then(|f| match f.ty {
+                        Type::Path(p) => Some(p.path),
+                        _ => None,
+                    }),
+                syn::Fields::Unit => None,
+            }
+            .unwrap_or_else(|| {
+                panic!(
+                    "Malformed Syntax. Expected {}(optional_path::to::StructName)",
+                    name
+                )
+            });
 
         // Parse variant's attributes
         let internal_attrs_idx = attrs
@@ -272,16 +292,12 @@ impl TryFrom<Variant> for EnumVariant {
         }
 
         let id = id.expect("Missing ID identifier.Each enum variant needs to be assigned an ID. #[attr(ID = 0x42)]");
-        Ok(EnumVariant { id, name, fields })
+        Ok(EnumVariant {
+            id,
+            name,
+            struct_name,
+        })
     }
-}
-
-/// Argument to #[enum_gen(...)] macro that will be passed 1:1
-/// to generated structs. Can be derive(Debug) or just e.g. no_mangle,
-/// so the group is optional.
-struct EnumAttribute {
-    ident: Ident,
-    group: Option<Group>,
 }
 
 fn expect_punct_token(token: Option<TokenTree>) {
@@ -295,124 +311,64 @@ fn expect_punct_token(token: Option<TokenTree>) {
     }
 }
 
-/// All arguments passed to #[enum_gen(...)] macro
-struct EnumGenArgs {
-    struct_attrs: Vec<EnumAttribute>,
-}
-
-/// Organize enum_gen macro arguments into a struct. Note that only a small
-/// part of arguments are getting parsed, the rest is technically invalid syntax
-/// until it's wrapped in #[] and used to decorate a struct.
-/// For that reason, we don't try to parse it yet.
-impl TryFrom<TokenStream> for EnumGenArgs {
-    type Error = ();
-
-    fn try_from(tokens: TokenStream) -> Result<Self, Self::Error> {
-        let mut tokens_iter = tokens.into_iter();
-        let mut attrs: Vec<EnumAttribute> = Vec::new();
-
-        loop {
-            // The macro argument can be derive(Debug) - with brackets,
-            // or without them - e.g. no_mangle
-            let Some(ident) = tokens_iter.next() else {
-                break;
-            };
-            let TokenTree::Ident(ident) = ident else {
-                panic!(
-                    "Malformed #[enum_gen(...)] syntax. Expected Ident-s. Example: \n\
-                        \t#[enum_gen(derive(Debug, Default), repr(C, packed))]"
-                );
-            };
-
-            let group = match tokens_iter.next() {
-                Some(TokenTree::Group(group)) => {
-                    let group = group.clone();
-                    // skip the following comma (or nothing)
-                    tokens_iter.next();
-                    Some(group)
-                }
-                _ => {
-                    // we consumed a comma (or nothing)
-                    None
-                }
-            };
-
-            attrs.push(EnumAttribute { ident, group });
-        }
-
-        Ok(EnumGenArgs {
-            struct_attrs: attrs,
-        })
-    }
-}
-
-/// Procedural macro to generate structures from enum variants. The variants can
-/// be assigned a numerical ID, which can be automatically matched by functions
-/// attributed with #[`enum_gen_match_id`].
+/// Mark the structure for further use with `#[enum_match_id]` or
+/// `#[enum_match_self]`. The `#[enum_match]` macro itself doesn't have any
+/// effect, but must be specified in order to use `#[enum_match_<id|self>]`.
+/// All variants in the attributed enum must contain a single unnamed field
+/// - a struct name.
 ///
-/// The enum variants must have either named data (struct like) or no data at all.
+/// The variants can be given a custom attribute to be used with
+/// `#[enum_match_id]`. Either:
+///  - `#[attr(ID = 0x42)]` (numerical ID)
+///  - `#[attr(ID = _)]` (default match case)
+/// See `#[enum_match_id]` for details.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use enum_gen::*;
+/// use enum_match::*;
 ///
-/// #[enum_gen(derive(Debug, Default), repr(C, packed))]
-/// pub enum Payload {
-///     #[attr(ID = 0x2b)]
-///     Hello { a: u8, b: u64, c: u64, d: u8 },
-///     #[attr(ID = 0x42)]
-///     Goodbye { a: u8, e: u8 },
-///     #[attr(ID = _)]
-///     Invalid,
-/// }
-/// ```
-///
-/// The `#[attr(ID = ...)]` is a mandatory attribute for every variant. The IDs must
-/// be unique, and there must be exactly one `#[attr(ID = _)]` variant which corresponds
-/// to the "default" case.
-///
-/// This will generate the following code:
-/// ```rust
-/// pub enum Payload {
+/// #[enum_match]
+/// enum Payload {
 ///     Hello(Hello),
 ///     Goodbye(Goodbye),
-///     Invalid(Invalid),
 /// }
-/// #[derive(Debug, Default)]
-/// #[repr(C, packed)]
-///     pub struct Hello {
+///
+/// struct Hello {
 ///     pub a: u8,
 ///     pub b: u64,
-///     pub c: u64,
-///     pub d: u8,
 /// }
-/// impl Hello {
-///     pub const ID: usize = 43usize;
-/// }
-/// #[derive(Debug, Default)]
-/// #[repr(C, packed)]
-///     pub struct Goodbye {
-///     pub a: u8,
+///
+/// struct Goodbye {
 ///     pub e: u8,
 /// }
-/// impl Goodbye {
-///     pub const ID: usize = 66usize;
+///
+/// impl Payload {
+///     #[enum_match_self(Payload)]
+///     fn size(&self) -> usize {
+///         std::mem::size_of_val(inner)
+///     }
 /// }
-/// #[derive(Debug, Default)]
-/// #[repr(C, packed)]
-/// pub struct Invalid {}
 /// ```
 ///
-/// The IDs aren't particularly useful on their own, but can be grealy leveraged
-/// with another #[enum_gen_match_id] proc macro.  See its documentation for details.
+/// For `#[enum_match_id]`, each enum variant must be given an ID. For each
+/// element, this can be done in two ways:
+///  - with `#[attr(ID = ...)]` attribute inside the enum
+///  - by specifying `const ID: usize = 0x42` for the given structure
+///
+/// Both methods can be used at the same time, with `#[attr(ID = ...)]` having
+/// higher priority. #[enum_match_id(...)]` requires each variant to have a
+/// unique ID, and exactly one variant must be given the default ID with
+/// `#[attr(ID = ...)]`. See #[enum_match_id] proc macro for details.
 #[proc_macro_attribute]
-pub fn enum_gen(
+pub fn enum_match(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let attr: TokenStream = attr.into();
-    let args: EnumGenArgs = attr.try_into().unwrap();
+    if !attr.is_empty() {
+        panic!("#[enum_match] macro doesn't accept any parameters");
+    }
 
     let ast = syn::parse_macro_input!(input as syn::DeriveInput);
     let enum_vis = ast.vis;
@@ -422,67 +378,23 @@ pub fn enum_gen(
     // Extract the enum variants
     let variants: Vec<syn::Variant> = match ast.data {
         syn::Data::Enum(data_enum) => data_enum.variants.into_iter().collect(),
-        _ => panic!("#[derive(ZerocopyEnum)] expects enum"),
+        _ => panic!("#[enum_match] expects enum"),
     };
 
     // Organize info about variants
     let variants = variants
         .into_iter()
-        .map(|mut variant| {
-            // set visibility to each field
-            for f in &mut variant.fields {
-                f.vis = enum_vis.clone();
-            }
-            EnumVariant::try_from(variant)
-        })
+        .map(EnumVariant::try_from)
         .collect::<Result<Vec<EnumVariant>, _>>()
         .unwrap();
 
-    // Re-create the original enum, now referencing soon-to-be-created structs
-    let mut ret_stream = quote! {
+    // Re-create the original enum, minus the internal attributes
+    let ret_stream = quote! {
         #(#enum_attrs)*
         #enum_vis enum #enum_ident {
             #(#variants),*
         }
     };
-
-    // Generate struct attributes (this is the first time their syntax is checked)
-    let attributes: Vec<Attribute> = args
-        .struct_attrs
-        .into_iter()
-        .map(|t| {
-            let ident = t.ident;
-            match t.group {
-                None => parse_quote!(
-                    #[#ident]
-                ),
-                Some(group) => parse_quote!(
-                    #[#ident #group]
-                ),
-            }
-        })
-        .collect();
-
-    // For each EnumVariant generate a struct and its impl
-    for v in &variants {
-        let EnumVariant { id, name, fields } = &v;
-
-        ret_stream.extend(quote! {
-            #(#attributes)*
-            #enum_vis struct #name {
-                #(#fields,)*
-            }
-        });
-
-        if let EnumVariantId::Val(id) = id {
-            ret_stream.extend(quote! {
-                impl #name {
-                    #[allow(dead_code)]
-                    pub const ID: usize = #id;
-                }
-            });
-        }
-    }
 
     // Lastly, save a global ref to this enum
     if let Ok(mut cache) = CACHE.lock() {
@@ -513,7 +425,7 @@ pub fn enum_gen(
             let enumref = cache.enums.get(&enum_ident.to_string()).unwrap();
 
             for pending in pending_match_fns {
-                enum_gen_match_with_enum(enumref, &pending);
+                enum_match_with_enum(enumref, &pending);
             }
         }
     } else {
@@ -523,14 +435,14 @@ pub fn enum_gen(
     ret_stream.into()
 }
 
-/// Parsed #[enum_gen_match[_id](...)]. In case the enum definition is not available,
+/// Parsed #[enum_match_<id|self>](...)]. In case the enum definition is not available,
 /// and the impl needs to be stored in the global state.
 struct EnumMatchFn {
     match_by: EnumMatchType,
     fn_str: String,
 }
 
-fn enum_gen_match_with_enum(
+fn enum_match_with_enum(
     enumref: &EnumRef,
     enum_match_fn: &EnumMatchFn,
 ) -> proc_macro2::TokenStream {
@@ -550,7 +462,7 @@ fn enum_gen_match_with_enum(
                 None
             }
         })
-        .expect("#[enum_gen_match[_id](...)] has to be used on function definition");
+        .expect("#[enum_match[_id](...)] has to be used on function definition");
 
     let variant_matcher = EnumVariantMatcher {
         match_by: enum_match_fn.match_by,
@@ -571,21 +483,18 @@ fn enum_gen_match_with_enum(
 
 fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro::TokenStream {
     if enum_name.is_empty() {
-        panic!("Argument is missing. Expected `#[enum_gen_match(MyEnumName)]`");
+        panic!("Argument is missing. Expected `#[enum_match(MyEnumName)]`");
     }
 
     let mut cache = CACHE.lock().unwrap();
     if let Some(enumref) = cache.enums.get(&enum_name) {
-        enum_gen_match_with_enum(enumref, &enum_match_fn).into()
+        enum_match_with_enum(enumref, &enum_match_fn).into()
     } else {
-        // We may be called before #[enum_gen], so handle it by storing
+        // We may be called before #[enum_match], so handle it by storing
         // this (stringified) function into cache. Unfortunately we don't
         // know if the enum exists at all. If it doesn't, this function
         // won't be ever instantiated, and won't generate any warning.
-        let pending_vec = cache
-            .pending_match_fns
-            .entry(enum_name)
-            .or_insert(Vec::new());
+        let pending_vec = cache.pending_match_fns.entry(enum_name).or_default();
         pending_vec.push(enum_match_fn);
         proc_macro::TokenStream::new()
     }
@@ -596,28 +505,44 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 /// to be one of the function parameters.
 ///
 /// This works by replacing the function body with an `id` match expression,
-/// where every match arm is filled with the original body, just preceeded with
+/// where every match arm is filled with the original body, but preceeded with
 /// different `use X as EnumStructType`. For this reason it's recommended to
-/// keep the function body minimal, potentially separating the generic logic to
-/// another helper function: `fn inner_logic_not_worth_duplicating<T: MyTrait>(v: &T)`.
+/// keep the function body minimal, potentially putting the common logic
+/// elsewhere.
 ///
 /// # Examples
 /// ```rust
-/// use enum_gen::*;
+/// use enum_match::*;
 ///
-/// #[enum_gen(derive(Debug, Default), repr(C, packed))]
-/// pub enum Payload {
+/// #[enum_match]
+/// enum Payload {
 ///     #[attr(ID = 0x2b)]
-///     Hello { a: u8, b: u64, c: u64, d: u8 },
-///     #[attr(ID = 0x42)]
-///     Goodbye { a: u8, e: u8 },
+///     Hello(Hello),
+///     Goodbye(Goodbye),
 ///     #[attr(ID = _)]
-///     Invalid,
+///     Invalid(Invalid)
 /// }
 ///
-/// #[enum_gen_match_id(Payload)]
-/// pub fn default(id: usize) -> Payload {
-///     EnumVariantType(EnumStructType::default())
+/// struct Hello {
+///     pub a: u32,
+///     pub b: u32,
+/// }
+///
+/// struct Goodbye {
+///     pub e: u32,
+/// }
+///
+/// impl Goodbye {
+///     const ID: usize = 0x42;
+/// }
+///
+/// struct Invalid {}
+///
+/// impl Payload {
+///     #[enum_match_id(Payload)]
+///     pub fn default(id: usize) -> Payload {
+///         EnumVariantType(EnumStructType::default())
+///     }
 /// }
 /// ```
 ///
@@ -631,7 +556,7 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 ///             use Payload::Hello as EnumVariantType;
 ///             EnumVariantType(EnumStructType::default())
 ///         }
-///         66 => {
+///         Goodbye::ID => {
 ///             use Goodbye as EnumStructType;
 ///             use Payload::Goodbye as EnumVariantType;
 ///             EnumVariantType(EnumStructType::default())
@@ -645,7 +570,7 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn enum_gen_match_id(
+pub fn enum_match_id(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
@@ -660,30 +585,39 @@ pub fn enum_gen_match_id(
     process_match_fn(enum_name, enum_match_fn)
 }
 
-/// Similar to #[`enum_gen_match_id`], but matches on `self` instead.
-/// The inner structure of variant is available through `inner` variable.
+/// Provide `inner` alias to the function body, which corresponds to the
+/// object stored inside the `self`'s variant.
+///
+/// This works by replacing the function body with a `self` match expression,
+/// where every match arm is filled with the original body. For this reason
+/// it's recommended to keep the function body minimal, potentially putting
+/// the common logic elsewhere.
+///
 /// This macro can be used on function with either `self`, `&self` or
 /// `&mut self` parameter.
 ///
 /// # Examples
 /// ```rust
-/// use enum_gen::*;
+/// use enum_match::*;
 ///
-/// #[enum_gen(derive(Debug, Default), repr(C, packed))]
+/// #[enum_match]
 /// pub enum Payload {
-///     #[attr(ID = 0x2b)]
-///     Hello { a: u8, b: u64, c: u64, d: u8 },
-///     #[attr(ID = 0x42)]
-///     Goodbye { a: u8, e: u8 },
-///     #[attr(ID = _)]
-///     Invalid,
+///     Hello(Hello),
+///     Goodbye(Goodbye),
 /// }
 ///
-/// impl Payload {
-///     #[enum_gen_match_self(Payload)]
-///     pub fn size(&self) -> usize {
-///         std::mem::size_of_val(inner)
-///     }
+/// pub struct Hello {
+///     pub a: u32,
+///     pub b: u32,
+/// }
+///
+/// pub struct Goodbye {
+///     pub e: u32,
+/// }
+///
+/// #[enum_match_self(Payload)]
+/// pub fn size(&self) -> usize {
+///    std::mem::size_of_val(inner)
 /// }
 /// ```
 ///
@@ -694,18 +628,9 @@ pub fn enum_gen_match_id(
 ///     pub fn size(&self) -> usize {
 ///         match &self {
 ///             Payload::Hello(inner) => {
-///                 use Hello as EnumStructType;
-///                 use Payload::Hello as EnumVariantType;
 ///                 std::mem::size_of_val(inner)
 ///             }
 ///             Payload::Goodbye(inner) => {
-///                 use Goodbye as EnumStructType;
-///                 use Payload::Goodbye as EnumVariantType;
-///                 std::mem::size_of_val(inner)
-///             }
-///             Payload::Invalid(inner) => {
-///                 use Invalid as EnumStructType;
-///                 use Payload::Invalid as EnumVariantType;
 ///                 std::mem::size_of_val(inner)
 ///             }
 ///         }
@@ -713,7 +638,7 @@ pub fn enum_gen_match_id(
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn enum_gen_match_self(
+pub fn enum_match_self(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {

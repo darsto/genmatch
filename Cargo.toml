@@ -1,9 +1,9 @@
 [package]
-name = "enum_gen"
+name = "enum_match"
 version = "0.1.0"
 edition = "2021"
 authors = ["Darek Stojaczyk <darek@stojaczyk.pl>"]
-repository = "https://github.com/darsto/enum_gen"
+repository = "https://github.com/darsto/enum_match"
 readme = "README.md"
 keywords = ["enum", "macro", "attribute", "parser", "serialization"]
 categories = ["parsing", "rust-patterns"]
@@ -15,8 +15,10 @@ Procedural macro to generate structures from enum variants
 [lib]
 proc-macro = true
 
+[workspace]
+
 [dependencies]
 lazy_static = "1.4"
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "2.0" }
+syn = { version = "2.0", features = ["extra-traits"] }
