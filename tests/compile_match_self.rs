@@ -2,7 +2,7 @@
  * Copyright(c) 2023 Darek Stojaczyk
  */
 
-use enum_match::*;
+use genmatch::*;
 
 #[derive(Debug, Default)]
 pub struct Hello {
@@ -21,7 +21,7 @@ pub struct Goodbye {
 #[derive(Debug, Default)]
 pub struct Invalid {}
 
-#[enum_match]
+#[genmatch]
 #[derive(Debug)]
 pub enum Payload {
     Hello(Hello),
@@ -30,7 +30,7 @@ pub enum Payload {
 }
 
 impl Payload {
-    #[enum_match_self(Payload)]
+    #[genmatch_self(Payload)]
     pub fn size(&self) -> usize {
         std::mem::size_of_val(inner)
     }

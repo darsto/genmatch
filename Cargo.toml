@@ -1,15 +1,15 @@
 [package]
-name = "enum_match"
+name = "genmatch"
 version = "0.1.0"
 edition = "2021"
 authors = ["Darek Stojaczyk <darek@stojaczyk.pl>"]
-repository = "https://github.com/darsto/enum_match"
+repository = "https://github.com/darsto/genmatch"
 readme = "README.md"
 keywords = ["enum", "macro", "attribute", "parser", "serialization"]
 categories = ["parsing", "rust-patterns"]
 license = "MIT"
 description = """
-Procedural macro to generate structures from enum variants
+Procedural macro to generate match expression for enum variants
 """
 
 [lib]

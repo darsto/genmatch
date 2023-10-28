@@ -2,7 +2,7 @@
  * Copyright(c) 2023 Darek Stojaczyk
  */
 
-//#![doc = include_str!("../README.md")]
+#![doc = include_str!("../README.md")]
 
 extern crate proc_macro;
 extern crate syn;
@@ -24,7 +24,7 @@ fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
     }
 }
 
-// State shared between #[enum_match] and #[enum_match_<id|self>] calls
+// State shared between #[genmatch] and #[genmatch_<id|self>] calls
 struct GlobalState {
     enums: HashMap<String, EnumRef>,
     pending_match_fns: HashMap<String, Vec<EnumMatchFn>>,
@@ -321,24 +321,24 @@ fn expect_punct_token(token: Option<TokenTree>) {
     }
 }
 
-/// Mark the structure for further use with `#[enum_match_id]` or
-/// `#[enum_match_self]`. The `#[enum_match]` macro itself doesn't have any
-/// effect, but must be specified in order to use `#[enum_match_<id|self>]`.
+/// Mark the structure for further use with `#[genmatch_id]` or
+/// `#[genmatch_self]`. The `#[genmatch]` macro itself doesn't have any
+/// effect, but must be specified in order to use `#[genmatch_<id|self>]`.
 /// All variants in the attributed enum must contain a single unnamed field
 /// - a struct name.
 ///
 /// The variants can be given a custom attribute to be used with
-/// `#[enum_match_id]`. Either:
+/// `#[genmatch_id]`. Either:
 ///  - `#[attr(ID = 0x42)]` (numerical ID)
 ///  - `#[attr(ID = _)]` (default match case)
-/// See `#[enum_match_id]` for details.
+/// See `#[genmatch_id]` for details.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use enum_match::*;
+/// use genmatch::*;
 ///
-/// #[enum_match]
+/// #[genmatch]
 /// enum Payload {
 ///     Hello(Hello),
 ///     Goodbye(Goodbye),
@@ -354,30 +354,30 @@ fn expect_punct_token(token: Option<TokenTree>) {
 /// }
 ///
 /// impl Payload {
-///     #[enum_match_self(Payload)]
+///     #[genmatch_self(Payload)]
 ///     fn size(&self) -> usize {
 ///         std::mem::size_of_val(inner)
 ///     }
 /// }
 /// ```
 ///
-/// For `#[enum_match_id]`, each enum variant must be given an ID. For each
+/// For `#[genmatch_id]`, each enum variant must be given an ID. For each
 /// element, this can be done in two ways:
 ///  - with `#[attr(ID = ...)]` attribute inside the enum
 ///  - by specifying `const ID: usize = 0x42` for the given structure
 ///
 /// Both methods can be used at the same time, with `#[attr(ID = ...)]` having
-/// higher priority. #[enum_match_id(...)]` requires each variant to have a
+/// higher priority. #[genmatch_id(...)]` requires each variant to have a
 /// unique ID, and exactly one variant must be given the default ID with
-/// `#[attr(ID = ...)]`. See #[enum_match_id] proc macro for details.
+/// `#[attr(ID = ...)]`. See #[genmatch_id] proc macro for details.
 #[proc_macro_attribute]
-pub fn enum_match(
+pub fn genmatch(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let attr: TokenStream = attr.into();
     if !attr.is_empty() {
-        panic!("#[enum_match] macro doesn't accept any parameters");
+        panic!("#[genmatch] macro doesn't accept any parameters");
     }
 
     let ast = syn::parse_macro_input!(input as syn::DeriveInput);
@@ -388,7 +388,7 @@ pub fn enum_match(
     // Extract the enum variants
     let variants: Vec<syn::Variant> = match ast.data {
         syn::Data::Enum(data_enum) => data_enum.variants.into_iter().collect(),
-        _ => panic!("#[enum_match] expects enum"),
+        _ => panic!("#[genmatch] expects enum"),
     };
 
     // Organize info about variants
@@ -435,7 +435,7 @@ pub fn enum_match(
             let enumref = cache.enums.get(&enum_ident.to_string()).unwrap();
 
             for pending in pending_match_fns {
-                enum_match_with_enum(enumref, &pending);
+                match_with_enum(enumref, &pending);
             }
         }
     } else {
@@ -445,14 +445,14 @@ pub fn enum_match(
     ret_stream.into()
 }
 
-/// Parsed #[enum_match_<id|self>](...)]. In case the enum definition is not available,
+/// Parsed #[genmatch_<id|self>](...)]. In case the enum definition is not available,
 /// and the impl needs to be stored in the global state.
 struct EnumMatchFn {
     match_by: EnumMatchType,
     fn_str: String,
 }
 
-fn enum_match_with_enum(
+fn match_with_enum(
     enumref: &EnumRef,
     enum_match_fn: &EnumMatchFn,
 ) -> proc_macro2::TokenStream {
@@ -472,7 +472,7 @@ fn enum_match_with_enum(
                 None
             }
         })
-        .expect("#[enum_match[_id](...)] has to be used on function definition");
+        .expect("#[genmatch_<id|self>(...)] has to be used on function definition");
 
     let variant_matcher = EnumVariantMatcher {
         match_by: enum_match_fn.match_by,
@@ -493,14 +493,14 @@ fn enum_match_with_enum(
 
 fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro::TokenStream {
     if enum_name.is_empty() {
-        panic!("Argument is missing. Expected `#[enum_match(MyEnumName)]`");
+        panic!("Argument is missing. Expected `#[genmatch_<id|self>(MyEnumName)]`");
     }
 
     let mut cache = CACHE.lock().unwrap();
     if let Some(enumref) = cache.enums.get(&enum_name) {
-        enum_match_with_enum(enumref, &enum_match_fn).into()
+        match_with_enum(enumref, &enum_match_fn).into()
     } else {
-        // We may be called before #[enum_match], so handle it by storing
+        // We may be called before #[genmatch], so handle it by storing
         // this (stringified) function into cache. Unfortunately we don't
         // know if the enum exists at all. If it doesn't, this function
         // won't be ever instantiated, and won't generate any warning.
@@ -522,9 +522,9 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 ///
 /// # Examples
 /// ```rust
-/// use enum_match::*;
+/// use genmatch::*;
 ///
-/// #[enum_match]
+/// #[genmatch]
 /// enum Payload {
 ///     #[attr(ID = 0x2b)]
 ///     Hello(Hello),
@@ -552,7 +552,7 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 /// struct Invalid {}
 ///
 /// impl Payload {
-///     #[enum_match_id(Payload)]
+///     #[genmatch_id(Payload)]
 ///     pub fn default(id: usize) -> Payload {
 ///         EnumVariantType(EnumStructType::default())
 ///     }
@@ -583,7 +583,7 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn enum_match_id(
+pub fn genmatch_id(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
@@ -611,9 +611,9 @@ pub fn enum_match_id(
 ///
 /// # Examples
 /// ```rust
-/// use enum_match::*;
+/// use genmatch::*;
 ///
-/// #[enum_match]
+/// #[genmatch]
 /// pub enum Payload {
 ///     Hello(Hello),
 ///     Goodbye(Goodbye),
@@ -629,7 +629,7 @@ pub fn enum_match_id(
 /// }
 ///
 /// impl Payload {
-///     #[enum_match_self(Payload)]
+///     #[genmatch_self(Payload)]
 ///     pub fn size(&self) -> usize {
 ///         std::mem::size_of_val(inner)
 ///     }
@@ -653,7 +653,7 @@ pub fn enum_match_id(
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn enum_match_self(
+pub fn genmatch_self(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {

@@ -2,7 +2,7 @@
  * Copyright(c) 2023 Darek Stojaczyk
  */
 
-use enum_match::*;
+use genmatch::*;
 
 #[derive(Debug, Default)]
 #[repr(C, packed)]
@@ -24,7 +24,7 @@ pub struct Goodbye {
 #[repr(C, packed)]
 pub struct Invalid {}
 
-#[enum_match]
+#[genmatch]
 #[derive(Debug)]
 pub enum Payload {
     #[attr(ID = 0x2b)]
@@ -36,22 +36,22 @@ pub enum Payload {
 }
 
 impl Payload {
-    #[enum_match_id(Payload)]
+    #[genmatch_id(Payload)]
     pub fn default(id: usize) -> Payload {
         EnumVariantType(EnumStructType::default())
     }
 
-    #[enum_match_id(Payload)]
+    #[genmatch_id(Payload)]
     pub fn size_of(id: usize) -> usize {
         std::mem::size_of::<EnumStructType>()
     }
 
-    #[enum_match_self(Payload)]
+    #[genmatch_self(Payload)]
     pub fn size(&self) -> usize {
         std::mem::size_of_val(inner)
     }
 
-    #[enum_match_self(Payload)]
+    #[genmatch_self(Payload)]
     pub fn consume(self) {
         println!("I'm going away! {:?}", &inner)
     }
@@ -66,7 +66,7 @@ impl Payload {
         }
     }
 
-    #[enum_match_self(Payload)]
+    #[genmatch_self(Payload)]
     pub fn memset(&mut self) {
         Payload::set_first_byte(inner);
     }

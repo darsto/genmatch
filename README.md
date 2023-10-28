@@ -1,52 +1,69 @@
-# enum_gen
+# genmatch
 
-Provides the `#[enum_gen]` procedural macro to generate structures from enum variants.
-The additional `#[enum_gen_match_self]` and `#[enum_gen_match_id]` macros allow automatically generating a match expression for the variants.
+Effectively, a lower level [enum_dispatch](https://crates.io/crates/enum_dispatch) crate.
 
-The `#[enum_gen_match_self]` macro can be essentially used to manually implement [#[enum_dispatch]](https://crates.io/crates/enum_dispatch), but with higher versability.
+Provides `#[genmatch_self]` and `#[genmatch_id]` macros to automatically generate match expression for given enum's variants. All variants are expected to contain a single unnamed field that is a struct.
 
-The `#[enum_gen_match_id]` macro can be used to match an enum variant by numerical ID, which has to be assigned to the variant in the orignal enum definition.
+`#[genmatch_self]` used on a function provides `inner` alias to the function body, which corresponds to the object stored inside the `self`'s variant.
+
+This works by replacing the function body with a `self` match expression, where every match arm is filled with the original body.
+
+`#[genmatch_id]` works similar, but matches on numerical ID that had to assigned to every enum variant. Then it provides the enum variant (type) and the inner struct (type) to be used inside the function.
 
 This is best explained with an example.
 
 ## Example
 
 ```rust
-use enum_gen::{enum_gen, enum_gen_match_id, enum_gen_match_self};
+use genmatch::{genmatch, genmatch_id, genmatch_self};
 
-#[enum_gen(derive(Debug, Default), repr(C, packed))]
-pub enum Payload {
+#[genmatch]
+#[derive(Debug)]
+enum Payload {
     #[attr(ID = 0x2b)]
-    Hello { a: u8, b: u64, c: u64, d: u8 },
+    Hello(Hello),
     #[attr(ID = 0x42)]
-    Goodbye { a: u8, e: u8 },
+    Goodbye(Goodbye),
     #[attr(ID = _)]
-    Invalid,
+    Invalid(Invalid),
 }
 
+#[derive(Debug, Default)]
+struct Hello {
+    pub a: u8,
+    pub b: u64,
+}
+
+#[derive(Debug, Default)]
+struct Goodbye {
+    pub e: u8,
+}
+
+#[derive(Debug, Default)]
+struct Invalid {}
+
 impl Payload {
-    #[enum_gen_match_id(Payload)]
-    pub fn default(id: usize) -> Payload {
+    #[genmatch_id(Payload)]
+    fn default(id: usize) -> Self {
         EnumVariantType(EnumStructType::default())
     }
-}
 
-#[enum_gen_match_id(Payload)]
-pub fn size_of_payload(id: usize) -> usize {
-    std::mem::size_of::<EnumStructType>()
-}
-
-impl Payload {
-    #[enum_gen_match_self(Payload)]
-    pub fn size(&self) -> usize {
+    #[genmatch_self(Payload)]
+    fn size(&self) -> usize {
         std::mem::size_of_val(inner)
     }
 }
 ```
 
-`#[enum_gen(derive(Debug, Default), repr(C, packed))]` is responsible for generating a struct for every enum variant, and attributing each one with `#[derive(Debug, Default)]` and `#[repr(C, packed)]`.
+`#[attr(ID = ...)]` are only needed for `#[genmatch_id(...)]`. They can be omitted if only `#[genmatch_self(...)]` is used. An alternative for `#[attr(ID = ...)]` is manually specifying `StructName::ID`, e.g.:
 
-`#[enum_gen_match_id(Payload)]` provides EnumVariantType and EnumStructType to be used in the function body, which correspond to enum variant identified by `id`. This could be explained as:
+```ignore
+impl Hello {
+    const ID: usize = 0x42;
+}
+```
+
+`#[genmatch_id(Payload)]` provides EnumVariantType and EnumStructType to be used in the function body, which correspond to enum variant identified by `id`. This could be explained as:
 
 ```ignore
 # pseudo-syntax
@@ -54,44 +71,34 @@ use StructBy<id> as EnumStructType;
 use Enum::VariantBy<id> as EnumVariantType;
 ```
 
-The proc macro actually works by replacing the function body with an `id` match expression, where every match arm is filled with the original body, just preceeded with different `use X as EnumStructType`. For this reason it's recommended to keep the function body minimal, potentially separating the generic logic to another helper function: `fn inner_logic_not_worth_duplicating<T: MyTrait>(v: &T)`.
-
-Lastly, `#[enum_gen_match_self(Payload)]` works the same as `#[enum_gen_match_id(Payload)]`, but matches on `self` instead. The inner structure of variant is available through `inner` variable. This macro is applicable to functions with either `self`, `&self`, or `&mut self` parameter.
+The proc macro actually works by replacing the function body with an `id` match expression, where every match arm is filled with the original body, just preceeded with different `use X as EnumStructType`. For this reason it's recommended to keep the function body minimal, and put the common logic elsewhere.
 
 The above example code is expanded to the following:
 
 ```rust
-pub enum Payload {
+#[derive(Debug)]
+enum Payload {
     Hello(Hello),
     Goodbye(Goodbye),
     Invalid(Invalid),
 }
+
 #[derive(Debug, Default)]
-#[repr(C, packed)]
-pub struct Hello {
+struct Hello {
     pub a: u8,
     pub b: u64,
-    pub c: u64,
-    pub d: u8,
 }
-impl Hello {
-    pub const ID: usize = 43usize;
-}
+
 #[derive(Debug, Default)]
-#[repr(C, packed)]
-pub struct Goodbye {
-    pub a: u8,
+struct Goodbye {
     pub e: u8,
 }
-impl Goodbye {
-    pub const ID: usize = 66usize;
-}
+
 #[derive(Debug, Default)]
-#[repr(C, packed)]
-pub struct Invalid {}
+struct Invalid {}
 
 impl Payload {
-    pub fn default(id: usize) -> Payload {
+    fn default(id: usize) -> Payload {
         match id {
             43 => {
                 use Hello as EnumStructType;
@@ -110,30 +117,8 @@ impl Payload {
             }
         }
     }
-}
 
-pub fn size_of_payload(id: usize) -> usize {
-    match id {
-        43 => {
-            use Hello as EnumStructType;
-            use Payload::Hello as EnumVariantType;
-            std::mem::size_of::<EnumStructType>()
-        }
-        66 => {
-            use Goodbye as EnumStructType;
-            use Payload::Goodbye as EnumVariantType;
-            std::mem::size_of::<EnumStructType>()
-        }
-        _ => {
-            use Invalid as EnumStructType;
-            use Payload::Invalid as EnumVariantType;
-            std::mem::size_of::<EnumStructType>()
-        }
-    }
-}
-
-impl Payload {
-    pub fn size(&self) -> usize {
+    fn size(&self) -> usize {
         match self {
             Payload::Hello(inner) => {
                 use Hello as EnumStructType;

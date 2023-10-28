@@ -2,7 +2,7 @@
  * Copyright(c) 2023 Darek Stojaczyk
  */
 
-use enum_match::*;
+use genmatch::*;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Hello {
@@ -25,7 +25,7 @@ impl Goodbye {
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Invalid {}
 
-#[enum_match]
+#[genmatch]
 #[derive(Debug, Eq, PartialEq)]
 pub enum Payload {
     #[attr(ID = 0x2b)]
@@ -36,7 +36,7 @@ pub enum Payload {
 }
 
 impl Payload {
-    #[enum_match_id(Payload)]
+    #[genmatch_id(Payload)]
     pub fn default(id: usize) -> Payload {
         EnumVariantType(EnumStructType::default())
     }
