@@ -10,10 +10,10 @@ extern crate syn;
 extern crate quote;
 
 use lazy_static::lazy_static;
-use proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTree};
+use proc_macro2::{Ident, Literal, Span, TokenStream, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
 use std::{collections::HashMap, str::FromStr, sync::Mutex};
-use syn::{parse_quote, Attribute, Expr, ExprAssign, Field, Meta, Path, Type, Variant};
+use syn::{Attribute, Meta, Type, Variant};
 
 #[allow(clippy::from_str_radix_10)]
 fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
@@ -452,10 +452,7 @@ struct EnumMatchFn {
     fn_str: String,
 }
 
-fn match_with_enum(
-    enumref: &EnumRef,
-    enum_match_fn: &EnumMatchFn,
-) -> proc_macro2::TokenStream {
+fn match_with_enum(enumref: &EnumRef, enum_match_fn: &EnumMatchFn) -> proc_macro2::TokenStream {
     let enum_name = Ident::new(&enumref.name, Span::call_site());
     let mut tokens: Vec<TokenTree> = proc_macro2::TokenStream::from_str(&enum_match_fn.fn_str)
         .unwrap()

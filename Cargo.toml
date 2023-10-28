@@ -1,6 +1,6 @@
 [package]
 name = "genmatch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Darek Stojaczyk <darek@stojaczyk.pl>"]
 repository = "https://github.com/darsto/genmatch"
@@ -15,10 +15,8 @@ Procedural macro to generate match expression for enum variants
 [lib]
 proc-macro = true
 
-[workspace]
-
 [dependencies]
 lazy_static = "1.4"
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "2.0", features = ["extra-traits"] }
+syn = { version = "2.0" }
