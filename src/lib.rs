@@ -2,7 +2,7 @@
  * Copyright(c) 2023 Darek Stojaczyk
  */
 
-#![doc = include_str!("../README.md")]
+//#![doc = include_str!("../README.md")]
 
 extern crate proc_macro;
 extern crate syn;
@@ -13,7 +13,7 @@ use lazy_static::lazy_static;
 use proc_macro2::{Group, Ident, Literal, Span, TokenStream, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
 use std::{collections::HashMap, str::FromStr, sync::Mutex};
-use syn::{parse_quote, Attribute, Field, Meta, Path, Type, Variant};
+use syn::{parse_quote, Attribute, Expr, ExprAssign, Field, Meta, Path, Type, Variant};
 
 #[allow(clippy::from_str_radix_10)]
 fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
@@ -61,25 +61,27 @@ struct EnumVariantRef {
 struct EnumVariant {
     id: EnumVariantId,
     name: Ident,
-    struct_name: Path,
+    attrs: Vec<Attribute>,
 }
 
 /// ToTokens into the final (generated) enum.
 impl ToTokens for EnumVariant {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let name = &self.name;
+        let attrs = &self.attrs;
         tokens.extend(quote! {
+            #(#attrs)*
             #name (#name)
         })
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum EnumVariantId {
     /// Regular match case
-    Val(usize),
-    /// No ID provided - expect it to be provided externally
-    /// TODO: None,
+    Explicit(usize),
+    /// No ID provided - use <struct_name>::ID
+    NotSpecified { struct_name: String },
     /// Default match case
     Default,
 }
@@ -87,7 +89,11 @@ enum EnumVariantId {
 impl ToTokens for EnumVariantId {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         match self {
-            EnumVariantId::Val(id) => tokens.append(Literal::usize_unsuffixed(*id)),
+            EnumVariantId::Explicit(id) => tokens.append(Literal::usize_unsuffixed(*id)),
+            EnumVariantId::NotSpecified { struct_name } => {
+                let struct_name = Ident::new(struct_name, Span::call_site());
+                tokens.extend(quote!(#struct_name::ID));
+            }
             EnumVariantId::Default => tokens.append(Ident::new("_", Span::call_site())),
         }
     }
@@ -164,11 +170,7 @@ impl<'a> ToTokens for EnumVariantMatcher<'a> {
             .filter(|v| matches!(v.id, EnumVariantId::Default));
 
         // Print some pretty messages for otherwise hard-to-debug problems
-        let default_variant = default_variants.next().expect(
-            "Default variant must be defined. E.g:\n\
-                    \t#[attr(ID = _)]\n\
-                    Unknown",
-        );
+        let default_variant = default_variants.next();
         if default_variants.next().is_some() {
             panic!("Only one variant with default ID (_) can be defined.");
         }
@@ -187,13 +189,20 @@ impl<'a> ToTokens for EnumVariantMatcher<'a> {
             m.to_tokens(tokens);
         }
 
-        let m = EnumVariantMatch {
-            match_by: self.match_by,
-            enum_name: self.enum_name,
-            variant: default_variant,
-            case: &self.case,
-        };
-        m.to_tokens(tokens);
+        if matches!(self.match_by, EnumMatchType::Id) || default_variant.is_some() {
+            let default_variant = default_variant.expect(
+                "Default variant must be defined. E.g:\n\
+                        \t#[attr(ID = _)]\n\
+                        Unknown",
+            );
+            let m = EnumVariantMatch {
+                match_by: self.match_by,
+                enum_name: self.enum_name,
+                variant: default_variant,
+                case: &self.case,
+            };
+            m.to_tokens(tokens);
+        }
     }
 }
 
@@ -203,100 +212,101 @@ impl TryFrom<Variant> for EnumVariant {
     fn try_from(variant: Variant) -> Result<Self, Self::Error> {
         let name = variant.ident.clone();
         let mut attrs = variant.attrs;
-        let struct_name =
-            match variant.fields {
-                syn::Fields::Named(..) => None,
-                syn::Fields::Unnamed(struct_name) => struct_name
-                    .unnamed
-                    .into_iter()
-                    .next()
-                    .and_then(|f| match f.ty {
-                        Type::Path(p) => Some(p.path),
-                        _ => None,
-                    }),
-                syn::Fields::Unit => None,
-            }
-            .unwrap_or_else(|| {
-                panic!(
-                    "Malformed Syntax. Expected {}(optional_path::to::StructName)",
-                    name
-                )
-            });
 
         // Parse variant's attributes
-        let internal_attrs_idx = attrs
-            .iter()
-            .position(|a| match &a.meta {
-                Meta::List(list) => {
-                    if let Some(ident) = list.path.get_ident() {
-                        *ident == "attr"
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            })
-            .expect("Each enum variant needs to be have an attr attribute. #[attr(ID = 0x42)]");
-        let internal_attrs = attrs.remove(internal_attrs_idx);
-        let Meta::List(internal_attrs) = internal_attrs.meta else {
-            panic!("`attr` attribute needs to describe a list. E.g: #[attr(ID = 0x42)]");
-        };
-
-        let mut tokens_iter = internal_attrs.tokens.into_iter();
-        let mut id: Option<EnumVariantId> = None;
-
-        loop {
-            let Some(token) = tokens_iter.next() else {
-                break;
-            };
-
-            let TokenTree::Ident(ident) = token else {
-                continue;
-            };
-
-            match ident.to_string().as_str() {
-                "ID" => {
-                    expect_punct_token(tokens_iter.next());
-                    let value = tokens_iter
-                        .next()
-                        .expect("Unknown attr syntax. Expected `#[attr(ID = 0x42)]`");
-
-                    id = Some(match &value {
-                        TokenTree::Ident(ident) => {
-                            if *ident == "_" {
-                                EnumVariantId::Default
-                            } else {
-                                let str = value.to_string();
-                                EnumVariantId::Val(
-                                    parse_int(&str)
-                                        .expect("Invalid ID attribute. Expected a number"),
-                                )
-                            }
-                        }
-                        _ => {
-                            let str = value.to_string();
-                            EnumVariantId::Val(
-                                parse_int(&str).expect("Invalid ID attribute. Expected a number"),
-                            )
-                        }
-                    });
-                }
-                name => {
-                    panic!("Unknown attribute `{name}`")
+        let internal_attrs_idx = attrs.iter().position(|a| match &a.meta {
+            Meta::List(list) => {
+                if let Some(ident) = list.path.get_ident() {
+                    *ident == "attr"
+                } else {
+                    false
                 }
             }
-        }
+            _ => false,
+        });
 
-        if attrs.len() > 1 {
-            panic!("Currently additional variant attributes are not supported");
-        }
+        let id = match internal_attrs_idx {
+            Some(internal_attrs_idx) => {
+                let internal_attrs = attrs.remove(internal_attrs_idx);
+                let Meta::List(internal_attrs) = internal_attrs.meta else {
+                    panic!("`attr` attribute needs to describe a list. E.g: #[attr(ID = 0x42)]");
+                };
 
-        let id = id.expect("Missing ID identifier.Each enum variant needs to be assigned an ID. #[attr(ID = 0x42)]");
-        Ok(EnumVariant {
-            id,
-            name,
-            struct_name,
-        })
+                let mut tokens_iter = internal_attrs.tokens.into_iter();
+                let mut id: Option<EnumVariantId> = None;
+
+                loop {
+                    let Some(token) = tokens_iter.next() else {
+                        break;
+                    };
+
+                    let TokenTree::Ident(ident) = token else {
+                        continue;
+                    };
+
+                    match ident.to_string().as_str() {
+                        "ID" => {
+                            expect_punct_token(tokens_iter.next());
+                            let value = tokens_iter
+                                .next()
+                                .expect("Unknown attr syntax. Expected `#[attr(ID = 0x42)]`");
+
+                            id = Some(match &value {
+                                TokenTree::Ident(ident) => {
+                                    if *ident == "_" {
+                                        EnumVariantId::Default
+                                    } else {
+                                        let str = value.to_string();
+                                        EnumVariantId::Explicit(
+                                            parse_int(&str)
+                                                .expect("Invalid ID attribute. Expected a number"),
+                                        )
+                                    }
+                                }
+                                _ => {
+                                    let str = value.to_string();
+                                    EnumVariantId::Explicit(
+                                        parse_int(&str)
+                                            .expect("Invalid ID attribute. Expected a number"),
+                                    )
+                                }
+                            });
+                        }
+                        name => {
+                            panic!("Unknown attribute `{name}`")
+                        }
+                    }
+                }
+
+                id.expect("Incomplete `attr` attribute. Expected e.g. #[attr(ID = 0x42)]")
+            }
+            None => {
+                let struct_name = match variant.fields {
+                    syn::Fields::Named(..) => None,
+                    syn::Fields::Unnamed(struct_name) => struct_name
+                        .unnamed
+                        .into_iter()
+                        .next()
+                        .and_then(|f| match f.ty {
+                            Type::Path(p) => Some(p.path),
+                            _ => None,
+                        }),
+                    syn::Fields::Unit => None,
+                }
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Invalid variant syntax. Expected {}(optional_path::to::StructName)",
+                        name
+                    )
+                });
+
+                EnumVariantId::NotSpecified {
+                    struct_name: struct_name.to_token_stream().to_string(),
+                }
+            }
+        };
+
+        Ok(EnumVariant { id, name, attrs })
     }
 }
 
@@ -405,7 +415,7 @@ pub fn enum_match(
                 variants: variants
                     .iter()
                     .map(|v| EnumVariantRef {
-                        id: v.id,
+                        id: v.id.clone(),
                         name: v.name.to_string(),
                     })
                     .collect(),
@@ -523,11 +533,13 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 ///     Invalid(Invalid)
 /// }
 ///
+/// #[derive(Default)]
 /// struct Hello {
 ///     pub a: u32,
 ///     pub b: u32,
 /// }
 ///
+/// #[derive(Default)]
 /// struct Goodbye {
 ///     pub e: u32,
 /// }
@@ -536,6 +548,7 @@ fn process_match_fn(enum_name: String, enum_match_fn: EnumMatchFn) -> proc_macro
 ///     const ID: usize = 0x42;
 /// }
 ///
+/// #[derive(Default)]
 /// struct Invalid {}
 ///
 /// impl Payload {
@@ -615,9 +628,11 @@ pub fn enum_match_id(
 ///     pub e: u32,
 /// }
 ///
-/// #[enum_match_self(Payload)]
-/// pub fn size(&self) -> usize {
-///    std::mem::size_of_val(inner)
+/// impl Payload {
+///     #[enum_match_self(Payload)]
+///     pub fn size(&self) -> usize {
+///         std::mem::size_of_val(inner)
+///     }
 /// }
 /// ```
 ///
