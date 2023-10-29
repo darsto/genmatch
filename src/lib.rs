@@ -13,7 +13,7 @@ use lazy_static::lazy_static;
 use proc_macro2::{Ident, Literal, Span, TokenStream, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
 use std::{collections::HashMap, str::FromStr, sync::Mutex};
-use syn::{Attribute, Meta, Type, Variant};
+use syn::{Attribute, Meta, Type, Variant, Path};
 
 #[allow(clippy::from_str_radix_10)]
 fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
@@ -55,12 +55,14 @@ struct EnumRef {
 struct EnumVariantRef {
     id: EnumVariantId,
     name: String,
+    struct_path: String,
 }
 
 /// Enum variant extracted from the original enum.
 struct EnumVariant {
     id: EnumVariantId,
     name: Ident,
+    struct_path: Path,
     attrs: Vec<Attribute>,
 }
 
@@ -68,10 +70,11 @@ struct EnumVariant {
 impl ToTokens for EnumVariant {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let name = &self.name;
+        let struct_path = &self.struct_path;
         let attrs = &self.attrs;
         tokens.extend(quote! {
             #(#attrs)*
-            #name (#name)
+            #name(#struct_path)
         })
     }
 }
@@ -91,7 +94,7 @@ impl ToTokens for EnumVariantId {
         match self {
             EnumVariantId::Explicit(id) => tokens.append(Literal::usize_unsuffixed(*id)),
             EnumVariantId::NotSpecified { struct_name } => {
-                let struct_name = Ident::new(struct_name, Span::call_site());
+                let struct_name = TokenStream::from_str(struct_name).unwrap();
                 tokens.extend(quote!(#struct_name::ID));
             }
             EnumVariantId::Default => tokens.append(Ident::new("_", Span::call_site())),
@@ -130,7 +133,8 @@ struct EnumVariantMatch<'a> {
 impl<'a> ToTokens for EnumVariantMatch<'a> {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let enum_name = self.enum_name;
-        let name = Ident::new(&self.variant.name, Span::call_site());
+        let variant_name = Ident::new(&self.variant.name, Span::call_site());
+        let struct_path = TokenStream::from_str(&self.variant.struct_path).unwrap();
         let id = &self.variant.id;
         let case = &self.case;
 
@@ -138,15 +142,15 @@ impl<'a> ToTokens for EnumVariantMatch<'a> {
             match self.match_by {
                 EnumMatchType::Id => quote! {
                     #id => {
-                        use #name as EnumStructType;
-                        use #enum_name::#name as EnumVariantType;
+                        use #struct_path as EnumStructType;
+                        use #enum_name::#variant_name as EnumVariantType;
                         #case
                     },
                 },
                 EnumMatchType::Variant => quote! {
-                    #enum_name::#name(inner) => {
-                        use #name as EnumStructType;
-                        use #enum_name::#name as EnumVariantType;
+                    #enum_name::#variant_name(inner) => {
+                        use #struct_path as EnumStructType;
+                        use #enum_name::#variant_name as EnumVariantType;
                         #case
                     },
                 },
@@ -211,9 +215,27 @@ impl TryFrom<Variant> for EnumVariant {
 
     fn try_from(variant: Variant) -> Result<Self, Self::Error> {
         let name = variant.ident.clone();
-        let mut attrs = variant.attrs;
+        let struct_path = match variant.fields {
+            syn::Fields::Named(..) => None,
+            syn::Fields::Unnamed(struct_name) => struct_name
+                .unnamed
+                .into_iter()
+                .next()
+                .and_then(|f| match f.ty {
+                    Type::Path(p) => Some(p.path),
+                    _ => None,
+                }),
+            syn::Fields::Unit => None,
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "Invalid variant syntax. Expected {}(optional_path::to::StructName)",
+                name
+            )
+        });
 
         // Parse variant's attributes
+        let mut attrs = variant.attrs;
         let internal_attrs_idx = attrs.iter().position(|a| match &a.meta {
             Meta::List(list) => {
                 if let Some(ident) = list.path.get_ident() {
@@ -224,6 +246,7 @@ impl TryFrom<Variant> for EnumVariant {
             }
             _ => false,
         });
+
 
         let id = match internal_attrs_idx {
             Some(internal_attrs_idx) => {
@@ -280,33 +303,10 @@ impl TryFrom<Variant> for EnumVariant {
 
                 id.expect("Incomplete `attr` attribute. Expected e.g. #[attr(ID = 0x42)]")
             }
-            None => {
-                let struct_name = match variant.fields {
-                    syn::Fields::Named(..) => None,
-                    syn::Fields::Unnamed(struct_name) => struct_name
-                        .unnamed
-                        .into_iter()
-                        .next()
-                        .and_then(|f| match f.ty {
-                            Type::Path(p) => Some(p.path),
-                            _ => None,
-                        }),
-                    syn::Fields::Unit => None,
-                }
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Invalid variant syntax. Expected {}(optional_path::to::StructName)",
-                        name
-                    )
-                });
-
-                EnumVariantId::NotSpecified {
-                    struct_name: struct_name.to_token_stream().to_string(),
-                }
-            }
+            None => EnumVariantId::NotSpecified { struct_name: struct_path.to_token_stream().to_string() }
         };
 
-        Ok(EnumVariant { id, name, attrs })
+        Ok(EnumVariant { id, name, struct_path, attrs })
     }
 }
 
@@ -417,6 +417,7 @@ pub fn genmatch(
                     .map(|v| EnumVariantRef {
                         id: v.id.clone(),
                         name: v.name.to_string(),
+                        struct_path: v.struct_path.to_token_stream().to_string(),
                     })
                     .collect(),
             },
