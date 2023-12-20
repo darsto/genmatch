@@ -13,7 +13,7 @@ use lazy_static::lazy_static;
 use proc_macro2::{Ident, Literal, Span, TokenStream, TokenTree};
 use quote::{ToTokens, TokenStreamExt};
 use std::{collections::HashMap, str::FromStr, sync::Mutex};
-use syn::{Attribute, Meta, Type, Variant, Path};
+use syn::{Attribute, Meta, Path, Type, Variant};
 
 #[allow(clippy::from_str_radix_10)]
 fn parse_int(str: &str) -> Result<usize, std::num::ParseIntError> {
@@ -215,24 +215,25 @@ impl TryFrom<Variant> for EnumVariant {
 
     fn try_from(variant: Variant) -> Result<Self, Self::Error> {
         let name = variant.ident.clone();
-        let struct_path = match variant.fields {
-            syn::Fields::Named(..) => None,
-            syn::Fields::Unnamed(struct_name) => struct_name
-                .unnamed
-                .into_iter()
-                .next()
-                .and_then(|f| match f.ty {
-                    Type::Path(p) => Some(p.path),
-                    _ => None,
-                }),
-            syn::Fields::Unit => None,
-        }
-        .unwrap_or_else(|| {
-            panic!(
-                "Invalid variant syntax. Expected {}(optional_path::to::StructName)",
-                name
-            )
-        });
+        let struct_path =
+            match variant.fields {
+                syn::Fields::Named(..) => None,
+                syn::Fields::Unnamed(struct_name) => struct_name
+                    .unnamed
+                    .into_iter()
+                    .next()
+                    .and_then(|f| match f.ty {
+                        Type::Path(p) => Some(p.path),
+                        _ => None,
+                    }),
+                syn::Fields::Unit => None,
+            }
+            .unwrap_or_else(|| {
+                panic!(
+                    "Invalid variant syntax. Expected {}(optional_path::to::StructName)",
+                    name
+                )
+            });
 
         // Parse variant's attributes
         let mut attrs = variant.attrs;
@@ -246,7 +247,6 @@ impl TryFrom<Variant> for EnumVariant {
             }
             _ => false,
         });
-
 
         let id = match internal_attrs_idx {
             Some(internal_attrs_idx) => {
@@ -303,10 +303,17 @@ impl TryFrom<Variant> for EnumVariant {
 
                 id.expect("Incomplete `attr` attribute. Expected e.g. #[attr(ID = 0x42)]")
             }
-            None => EnumVariantId::NotSpecified { struct_name: struct_path.to_token_stream().to_string() }
+            None => EnumVariantId::NotSpecified {
+                struct_name: struct_path.to_token_stream().to_string(),
+            },
         };
 
-        Ok(EnumVariant { id, name, struct_path, attrs })
+        Ok(EnumVariant {
+            id,
+            name,
+            struct_path,
+            attrs,
+        })
     }
 }
 
